@@ -1,0 +1,18 @@
+<html>
+<head></head>
+<body>
+    <audio id="audio" controls></audio>
+    <!-- <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.8.3/dist/ffmpeg.min.js"></script> -->
+    <script src="hca.js"></script>
+    <script>
+        hca = new HCA();
+        fetch("bgm01_anime02_hca.hca").then((res) => {
+            res.arrayBuffer().then((ab) => {
+                hca.load(new Uint8Array(ab));
+                const stream = hca.decode(hca.decrypted, 16);
+                audio.src = URL.createObjectURL(new Blob([stream], {type : 'audio/x-wav'}));
+            })
+        })
+    </script>
+</body>
+</html>
