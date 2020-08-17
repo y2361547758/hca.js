@@ -666,7 +666,7 @@ var stChannel = /** @class */ (function () {
         for (var i = 0; i < this.count; i++) {
             v = this.value[i];
             if (v) {
-                v = ath[i] + ((b + i) >> 8) - Math.floor(v * 5 / 2) + 1;
+                v = ath[i] + ((b + i) >> 8) - ((v * 5) >> 1) + 1;
                 if (v < 0)
                     v = 15;
                 else if (v >= 0x39)
@@ -713,7 +713,7 @@ var stChannel = /** @class */ (function () {
                 f = list3[v];
             }
             else {
-                v = (1 - ((v & 1) << 1)) * Math.floor(v / 2);
+                v = (1 - ((v & 1) << 1)) * (v >> 1);
                 if (!v)
                     data.seek(-1);
                 f = v;
