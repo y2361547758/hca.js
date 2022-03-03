@@ -78,12 +78,12 @@ typedef struct {
 	_samplingRate = samplingRate;
 	uint32 blockCount;
 	_blockCount = blockCount;
-	uint16 muteHeader;
-	uint16 muteFooter;
+	uint16 droppedHeader;
+	uint16 droppedFooter;
 } stFormat <read=formatRead>;
 string formatRead(stFormat& o) {
-	uchar dist[10];
-	SPrintf(dist, "%d %d", o.channelCount, o.samplingRate);
+	uchar dist[32];
+	SPrintf(dist, "%dch %dHz [%d, %d)", o.channelCount, o.samplingRate, o.droppedHeader, o.blockCount * 1024 - o.droppedFooter);
 	return dist;
 }
 
@@ -128,16 +128,13 @@ typedef struct {
 typedef struct {
 	uint32 start;
 	uint32 end;
-	uint16 count;
-	uint16 r01;
+	uint16 droppedHeader;
+	uint16 droppedFooter;
 } stLoop <read=loopRead>;
 wstring loopRead(stLoop& o) {
-	uchar dist[16];
-	uchar dist2[8];
-	SPrintf(dist, "[%d, %d]", o.start, o.end);
-	if (o.count == 0x80) dist2 = "无限";
-	else SPrintf(dist2, "%d", o.count);
-	return StringToWString(dist + " x " + dist2, CHARSET_UTF8);
+	uchar dist[32];
+	SPrintf(dist, "at sample: [%d, %d)", o.start * 1024 + o.droppedHeader, (o.end + 1) * 1024 - o.droppedFooter);
+	return StringToWString(dist, CHARSET_UTF8);
 }
 
 typedef struct {
@@ -145,11 +142,11 @@ typedef struct {
 } stCipher <read=cipherRead>;
 wstring cipherRead(stCipher& o) {
 	switch (o.type) {
-		case 0: return StringToWString("无加密", CHARSET_UTF8);
-		case 1: return StringToWString("无秘钥加密", CHARSET_UTF8);
-		case 0x38: return StringToWString("加密", CHARSET_UTF8);
+		case 0: return StringToWString("unencrypted", CHARSET_UTF8);
+		case 1: return StringToWString("encrypted with no key", CHARSET_UTF8);
+		case 0x38: return StringToWString("encrypted with specific key", CHARSET_UTF8);
 	}
-	return StringToWString("未知", CHARSET_UTF8);
+	return StringToWString("unknown", CHARSET_UTF8);
 }
 
 typedef struct {
