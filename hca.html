@@ -162,7 +162,7 @@
                         ["Dropped smpl. (tail)", info.loop.droppedFooter],
                     ]],
                     ["Cipher", !info.hasHeader["ciph"] ? null : toHex(info.cipher)],
-                    ["RVA", !info.hasHeader["rva"] ? null : info.rva],
+                    ["RVA (volume)", !info.hasHeader["rva"] ? null : info.rva],
                     ["Comment", !info.hasHeader["comm"] ? null : info.comment],
                 ];
                 for (let item of hcaInfoTextArray) {
