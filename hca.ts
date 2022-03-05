@@ -177,6 +177,10 @@ class HCAInfo {
                     this.rva = p.getFloat32(ftell + 4);
                     ftell += 8;
                     break;
+                case "vbr":
+                    this.vbr.MaxBlockSize = p.getUint16(ftell + 4);
+                    this.vbr.NoiseLevel = p.getInt16(ftell + 6);
+                    break;
                 case "comm":
                     let len = p.getUint8(ftell + 4);
                     let jisdecoder = new TextDecoder('shift-jis');
