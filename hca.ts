@@ -5,6 +5,7 @@ for (let i = 2; i < 127; i++) scale_conversion_table[i] = Math.pow(2, (i - 64) *
 
 class HCAInfo {
     private rawHeader: Uint8Array;
+
     version = "";
     dataOffset = 0;
     format = {
@@ -18,7 +19,22 @@ class HCAInfo {
     hasHeader: Record<string, boolean> = {};
     headerOffset: Record<string, [number, number]> = {}; // [start (inclusive), end (exclusive)]
     bps = 0;
-    compParam = new Uint8Array(9);
+    compDec = {
+        MinResolution: 0,
+        MaxResolution: 0,
+        TrackCount: 0,
+        ChannelConfig: 0,
+        TotalBandCount: 0,
+        BaseBandCount: 0,
+        StereoBandCount: 0,
+        HfrBandCount: 0,
+        BandsPerHfrGroup: 0,
+        Reserved1: 0,
+        Reserved2: 0,
+    };
+    dec = {
+        DecStereoType: 0,
+    }
     ath = 0;
     loop = {
         start: 0,
@@ -28,10 +44,17 @@ class HCAInfo {
         droppedHeader: 0, // VGAudio's interpretation
         droppedFooter: 0,
     }
+    vbr = {
+        MaxBlockSize: 0,
+        NoiseLevel: 0,
+    }
+    UseAthCurve: boolean = false;
     cipher = 0;
     rva = 0.0;
     comment = "";
+
     // computed sample count/offsets
+    HfrGroupCount = 0;
     fullSampleCount = 0;
     startAtSample = 0;
     endAtSample = 0;
@@ -102,21 +125,35 @@ class HCAInfo {
                 case "comp":
                     this.blockSize = p.getUint16(ftell + 4);
                     this.bps = this.format.samplingRate * this.blockSize / 128000.0;
-                    this.compParam = hca.slice(ftell + 6, ftell + 6 + 9);
+                    this.compDec.MinResolution = p.getUint8(ftell + 6);
+                    this.compDec.MaxResolution = p.getUint8(ftell + 7);
+                    this.compDec.TrackCount = p.getUint8(ftell + 8);
+                    this.compDec.ChannelConfig = p.getUint8(ftell + 9);
+                    this.compDec.TotalBandCount = p.getUint8(ftell + 10);
+                    this.compDec.BaseBandCount = p.getUint8(ftell + 11);
+                    this.compDec.StereoBandCount = p.getUint8(ftell + 12);
+                    this.compDec.BandsPerHfrGroup = p.getUint8(ftell + 13);
+                    this.compDec.Reserved1 = p.getUint8(ftell + 14);
+                    this.compDec.Reserved2 = p.getUint8(ftell + 15);
                     ftell += 16;
                     break;
                 case "dec":
                     this.blockSize = p.getUint16(ftell + 4);
                     this.bps = this.format.samplingRate * this.blockSize / 128000.0;
-                    this.compParam[0] = p.getUint8(ftell + 6);
-                    this.compParam[1] = p.getUint8(ftell + 7);
-                    this.compParam[2] = p.getUint8(ftell + 11);
-                    this.compParam[3] = p.getUint8(ftell + 10);
-                    this.compParam[4] = p.getUint8(ftell + 8) + 1;
-                    this.compParam[5] = (p.getUint8(ftell + 12) ? p.getUint8(ftell + 9) : p.getUint8(ftell + 8)) + 1;
-                    this.compParam[6] = this.compParam[4] - this.compParam[5];
-                    this.compParam[7] = 0;
-                    ftell += 13;
+                    this.compDec.MinResolution = p.getUint8(ftell + 6);
+                    this.compDec.MaxResolution = p.getUint8(ftell + 7);
+                    this.compDec.TotalBandCount = p.getUint8(ftell + 8); + 1;
+                    this.compDec.BaseBandCount = p.getUint8(ftell + 9); + 1;
+                    let a = p.getUint8(ftell + 10);
+                    this.compDec.TrackCount = HCAUtilFunc.GetHighNibble(a);
+                    this.compDec.ChannelConfig = HCAUtilFunc.GetLowNibble(a);
+                    this.dec.DecStereoType = p.getUint8(ftell + 11);
+                    if (this.dec.DecStereoType == 0) {
+                        this.compDec.BaseBandCount = this.compDec.TotalBandCount;
+                    } else {
+                        this.compDec.StereoBandCount = this.compDec.TotalBandCount - this.compDec.BaseBandCount;
+                    }
+                    ftell += 12;
                     break;
                 case "vbr":
                     ftell += 8;
@@ -158,10 +195,23 @@ class HCAInfo {
                 hasModDone = true;
             }
         }
+        /*
+        // (ported from) Nyagamon's original code, should be (almost) equivalent to CalculateHfrValues
         this.compParam[2] = this.compParam[2] || 1;
         let _a = this.compParam[4] - this.compParam[5] - this.compParam[6];
         let _b = this.compParam[7];
-        this.compParam[8] = _b > 0 ? _a / _b + (_a % _b ? 1 : 0) : 0;
+        this.compDec.Reserved1 = _b > 0 ? _a / _b + (_a % _b ? 1 : 0) : 0;
+        // Translating the above code with meaningful variable names:
+        this.compDec.TrackCount = this.compDec.TrackCount || 1;
+        this.compDec.HfrBandCount = this.compDec.TotalBandCount - this.compDec.BaseBandCount - this.compDec.StereoBandCount;
+        this.HfrGroupCount = this.compDec.BandsPerHfrGroup;
+        this.compDec.Reserved1 = this.HfrGroupCount > 0 ? this.compDec.HfrBandCount / this.HfrGroupCount + (this.compDec.HfrBandCount % this.HfrGroupCount ? 1 : 0) : 0;
+        */
+        // CalculateHfrValues, ported from VGAudio
+        if (this.compDec.BandsPerHfrGroup > 0) {
+            this.compDec.HfrBandCount = this.compDec.TotalBandCount - this.compDec.BaseBandCount - this.compDec.StereoBandCount;
+            this.HfrGroupCount = HCAUtilFunc.DivideByRoundUp(this.compDec.HfrBandCount, this.compDec.BandsPerHfrGroup);
+        }
         // calculate sample count/offsets
         this.fullSampleCount = this.format.blockCount * 0x400;
         this.startAtSample = this.format.droppedHeader;
@@ -281,6 +331,22 @@ class HCAInfo {
     constructor (hca: Uint8Array, changeMask: boolean = false, encrypt: boolean = false) {
         // if changeMask == true, (un)mask the header sigs in-place
         this.rawHeader = this.parseHeader(hca, changeMask, encrypt, {});
+    }
+}
+
+class HCAUtilFunc
+{
+    static DivideByRoundUp(/*int*/ value: number, /*int*/ divisor: number): number
+    {
+        return Math.ceil(value / divisor);
+    }
+    static GetHighNibble(value: number): number
+    {
+        return (value >> 4) & 0xF;
+    }
+    static GetLowNibble(value: number): number
+    {
+        return value & 0xF;
     }
 }
 
@@ -534,11 +600,11 @@ class HCA {
         let magic = data.read(16);
         if (magic == 0xFFFF) {
             let a = (data.read(9) << 8) - data.read(7);
-            for (let i = 0; i < info.format.channelCount; i++) HCADecoder.step1(channel[i], data, info.compParam[8], a);
+            for (let i = 0; i < info.format.channelCount; i++) HCADecoder.step1(channel[i], data, info.HfrGroupCount/*info.compDec.Reserved1*/, a);
             for (let i = 0; i<8; i++) {
                 for (let j = 0; j < info.format.channelCount; j++) HCADecoder.step2(channel[j], data);
-                for (let j = 0; j < info.format.channelCount; j++) HCADecoder.step3(channel[j], info.compParam[8], info.compParam[7], info.compParam[6] + info.compParam[5], info.compParam[4]);
-                for (let j = 0; j < info.format.channelCount - 1; j++) HCADecoder.step4(channel[j], i, info.compParam[4] - info.compParam[5], info.compParam[5], info.compParam[6], channel[j + 1]);
+                for (let j = 0; j < info.format.channelCount; j++) HCADecoder.step3(channel[j], info.HfrGroupCount/*info.compDec.Reserved1*/, info.compDec.BandsPerHfrGroup, info.compDec.StereoBandCount + info.compDec.BaseBandCount, info.compDec.TotalBandCount);
+                for (let j = 0; j < info.format.channelCount - 1; j++) HCADecoder.step4(channel[j], i, info.compDec.TotalBandCount - info.compDec.BaseBandCount, info.compDec.BaseBandCount, info.compDec.StereoBandCount, channel[j + 1]);
                 for (let j = 0; j < info.format.channelCount; j++) HCADecoder.step5(channel[j], i);
             }
         }
@@ -1331,9 +1397,9 @@ class HCAInternalState {
     channel: HCAChannelContext[];
     private initialize(info: HCAInfo): HCAChannelContext[] {
         let r = new Uint8Array(0x10);
-        let b = Math.floor(info.format.channelCount / info.compParam[2]);
-        if (info.compParam[6] && b > 1) {
-            for (let i = 0; i < info.compParam[2]; ++i) switch (b) {
+        let b = Math.floor(info.format.channelCount / info.compDec.TrackCount);
+        if (info.compDec.StereoBandCount && b > 1) {
+            for (let i = 0; i < info.compDec.TrackCount; ++i) switch (b) {
                 case 8:
                     r[i * b + 6] = 1;
                     r[i * b + 7] = 2;
@@ -1342,12 +1408,12 @@ class HCAInternalState {
                     r[i * b + 4] = 1;
                     r[i * b + 5] = 2;
                 case 5:
-                    if (b == 5 && info.compParam[3] <= 2) {
+                    if (b == 5 && info.compDec.ChannelConfig <= 2) {
                         r[i * b + 3] = 1;
                         r[i * b + 4] = 2;
                     }
                 case 4:
-                    if (b == 4 && info.compParam[3] == 0) {
+                    if (b == 4 && info.compDec.ChannelConfig == 0) {
                         r[i * b + 2] = 1;
                         r[i * b + 3] = 2;
                     }
@@ -1362,8 +1428,8 @@ class HCAInternalState {
         for (let i = 0; i < info.format.channelCount; ++i) {
             let c = new HCAChannelContext();
             c.type = r[i];
-            c.value3 = c.value.subarray(info.compParam[5] + info.compParam[6]);
-            c.count = info.compParam[5] + (r[i] != 2 ? info.compParam[6] : 0);
+            c.value3 = c.value.subarray(info.compDec.BaseBandCount + info.compDec.StereoBandCount);
+            c.count = info.compDec.BaseBandCount + (r[i] != 2 ? info.compDec.StereoBandCount : 0);
             channel.push(c);
         }
         return channel;
