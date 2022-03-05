@@ -35,7 +35,6 @@ class HCAInfo {
     dec = {
         DecStereoType: 0,
     }
-    ath = 0;
     loop = {
         start: 0,
         end: 0,
@@ -159,7 +158,7 @@ class HCAInfo {
                     ftell += 8;
                     break;
                 case "ath":
-                    this.ath = p.getUint16(ftell + 4);
+                    this.UseAthCurve = p.getUint16(ftell + 4) == 1;
                     ftell += 6;
                     break;
                 case "loop":
