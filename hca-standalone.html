@@ -1,3 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head></head>
+<body>
+    <h1>HCA decoder demo</h1>
+    <hr>
+    <button disabled id="startworkerbtn">start background worker</button><br>
+    <button disabled id="shutdownbtn">shutdown background worker</button><br>
+    <hr>
+    <h3>Choose a HCA file</h3>
+    Pick a local file: <input type="file" id="localfile" accept=".hca" onchange="buttons.loadfilebtn = this.files.length > 0"><br>
+    <button disabled id="loadfilebtn">load picked file</button><br> 
+    Or download from URL: <input type="text" id="urlinput" value="bgm01_anime02_hca.hca"><br>
+    <button id="downloadbtn">download</button><br>
+    <hr>
+    <h3>Set keys for decryption/encryption</h3>
+    key1=<input type="text" id="key1input" value="0x01395C51"><br>
+    key2=<input type="text" id="key2input" value="0x00000000"><br>
+    <i>Note: output waveform will be nothing but unpleasant meaningless noise if incorrect keys are given!</i><br>
+    <hr>
+    <h3>Set decoding mode/loop count/volume</h3>
+    Decoding mode: <input type="number" step="8" min="0" max="32" placeholder="0-99" id="decodingmodeinput" value="16"><br>
+    Loop count: <input type="number" step="1" min="0" max="99" placeholder="0-99" id="loopcountinput" value="0"><br>
+    Volume: <input type="number" step="1" min="0" max="100" placeholder="0-100" id="volumeinput" value="100"><br>
+    Note:<br>
+    (1) Setting decoding mode to <b>zero means 32-bit float mode</b>, or <b>8/16/24/32-bit integer mode</b> otherwise.<br>
+    (2) Loop count is <b>ignored if HCA header doesn't have loop section</b><br>
+    (3) Loop count doesn't count the existing part which is originally supposed to be looped.<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<b>In other words, actual loop count will be: the number set here plus one.</b><br>
+    (4) When <b>decoding the whole file</b>, setting loop count to <b>zero</b> means: <b>disabling loop</b>.</b><br>
+    <hr>
+    <h3>Decode the whole file</h3>
+    <button disabled id="infobtn">get HCA info</button><br>
+    <style>
+        table {
+            border-top: 1px solid #000;
+            border-left: 1px solid #000;
+            border-spacing: 0;
+        }
+        tbody td {
+            border-bottom: 1px solid #000;
+            border-right: 1px solid #000;
+            min-width: 8ch;
+        }
+        thead tr th, tfoot tr th {
+            background-color: #fff;
+            color: #000;
+            border-bottom: 1px solid #000;
+            border-right: 1px solid #000;
+        }
+    </style>
+    <table id="hcaInfoTable">
+        <thead>
+            <tr>
+                <th colspan="3">HCA info</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>(Not loaded)</td>
+            </tr>
+        </tbody>
+    </table>
+    <button disabled id="fixcsumbtn">fix checksum</button><br>
+    <button disabled id="encryptbtn">encrypt</button><br>
+    <button disabled id="decryptbtn">decrypt</button><br>
+    <button disabled id="decodebtn">decode</button><br>
+    <audio id="audioElement" controls></audio>
+    <!-- <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.8.3/dist/ffmpeg.min.js"></script> -->
+    <script id="hcajs">
 "use strict";
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
@@ -1683,3 +1753,544 @@ class HCAWorker {
         });
     }
 }
+    </script>
+    <script>
+        // mime types
+        const defMimeType = "application/octet-stream";
+        const mimeTypeMap = {
+            wav: "audio/x-wav",
+            hca: defMimeType,
+        }
+
+        // HCAWorker instance
+        var worker = null;
+        const hcaJsUrl = new URL(URL.createObjectURL(new Blob([document.querySelector("#hcajs").textContent], {type: "text/javascript"})));
+
+        // local file picker
+        const localfile = document.getElementById("localfile");
+        // reset state on refresh
+        // https://bugzilla.mozilla.org/show_bug.cgi?id=685657
+        localfile.value = null;
+
+        // input HCA URL
+        const urlinput = document.getElementById("urlinput");
+
+        // file name
+        var fileName = null;
+
+        // HCA info table
+        const hcaInfoTable = {
+            el: document.getElementById("hcaInfoTable"),
+            body: {
+                el: document.getElementById("hcaInfoTable")
+                    .getElementsByTagName('tbody')[0],
+                defText: document.getElementById("hcaInfoTable")
+                    .getElementsByTagName('tbody')[0]
+                    .getElementsByTagName("td")[0]
+                    .textContent,
+                data: {},
+            },
+        }
+        Object.defineProperty(hcaInfoTable.body, "data", {
+            get: function () {return this.value},
+            set: function (val) {
+                // clear existing content
+                for (let i = hcaInfoTable.body.el.getElementsByTagName("tr").length - 1; i >= 0; i--) {
+                    hcaInfoTable.body.el.deleteRow(i);
+                }
+                function appendRow(cells, rowspan) {
+                    let newRow = hcaInfoTable.body.el.insertRow(-1);
+                    cells.forEach((val, idx) => {
+                        let newCell = newRow.insertCell(idx);
+                        if (rowspan != null && idx == 0)
+                            newCell.setAttribute("rowspan", rowspan);
+                        if (cells.length < 3 && idx == cells.length - 1)
+                            newCell.setAttribute("colspan", cells.length - idx + 1);
+                        let newText = val != null
+                            ? document.createTextNode("" + val)
+                            : (() => {
+                                let italic = document.createElement("i");
+                                italic.innerHTML = "(not defined)";
+                                return italic;
+                            })();
+                        newCell.appendChild(newText);
+                    });
+                }
+                function toHex(num) {
+                    const padding = "0000";
+                    let hex = padding + num.toString(padding.length * 4).toUpperCase();
+                    return "0x" + hex.substring(hex.length - padding.length, hex.length)
+                }
+                if (val == null || !val instanceof HCAInfo) {
+                    appendRow([hcaInfoTable.body.defText]);
+                    return; // nothing to add
+                }
+                // add given content
+                let info = val;
+                const hcaInfoTextArray = [
+                    ["Version", info.version],
+                    ["Header size", info.dataOffset],
+                    ["Format", !info.hasHeader["fmt"] ? null : [
+                        ["Channels", info.format.channelCount],
+                        ["Sampling Rate", info.format.samplingRate],
+                        ["Blocks", info.format.blockCount],
+                        ["Dropped smpl. (head)", info.format.droppedHeader],
+                        ["Dropped smpl. (tail)", info.format.droppedFooter],
+                    ]],
+                    ["Block size", !info.hasHeader["comp"] && !info.hasHeader["dec"] ? null : info.blockSize],
+                    ["Bitrate", !info.hasHeader["comp"] && !info.hasHeader["dec"] ? null : info.bps],
+                    ["VBR", info.hasHeader["vbr"] ? "yes" : "no"],
+                    ["ATH", !info.hasHeader["ath"] ? null : toHex(info.ath)],
+                    ["Loop", !info.hasHeader["loop"] ? null : [
+                        ["Start", info.loop.start],
+                        ["End", info.loop.end],
+                        ["Dropped smpl. (head)", info.loop.droppedHeader],
+                        ["Dropped smpl. (tail)", info.loop.droppedFooter],
+                    ]],
+                    ["Cipher", !info.hasHeader["ciph"] ? null : toHex(info.cipher)],
+                    ["RVA", !info.hasHeader["rva"] ? null : info.rva],
+                    ["Comment", !info.hasHeader["comm"] ? null : info.comment],
+                ];
+                for (let item of hcaInfoTextArray) {
+                    let key = item[0];
+                    let val = item[1];
+                    if (Array.isArray(val)) {
+                        let textList = val[0].slice(0);
+                        textList.unshift(key);
+                        appendRow(textList, val.length);
+                        val.shift();
+                        val.forEach((item) => appendRow(item))
+                    } else {
+                        appendRow([key, val]);
+                    }
+                }
+                // update value
+                this.value = val;
+            },
+        });
+
+        // keys
+        const keys = {key1: undefined, key2: undefined};
+        for (let key in keys) {
+            Object.defineProperty(keys, key, {
+                get: function () {return document.getElementById(key + "input").value},
+                set: function (val) {document.getElementById(key + "input").value = val},
+            });
+        }
+
+        // mode/loop/volume
+        const decodingParam = {
+            mode: {
+                el: document.getElementById("decodingmodeinput"),
+                defVal: 16,
+            },
+            loop: {
+                el: document.getElementById("loopcountinput"),
+                defVal: 0,
+            },
+            volumePerCent: {
+                el: document.getElementById("volumeinput"),
+                defVal: 100,
+            },
+        }
+
+        for (let paramName in decodingParam) {
+            let el = decodingParam[paramName].el;
+            let defVal = decodingParam[paramName].defVal;
+            let attr = {};
+            ["min", "max", "step"].forEach((attrName) => attr[attrName] = el.getAttribute(attrName));
+            function clampVal(val) {
+                if (val == null || val === "")
+                    return defVal;
+                val = parseInt(val);
+                if (isNaN(val))
+                    return defVal;
+                if (val % attr.step != 0)
+                    val = Math.floor(val / attr.step);
+                else if (val < attr.min)
+                    val = attr.min;
+                else if (val > attr.max)
+                    val = attr.max;
+                return val;
+            }
+            Object.defineProperty(decodingParam, paramName, {
+                get: function () {
+                    let clamped = clampVal(el.value);
+                    el.value = "" + clamped;
+                    return clamped;
+                },
+                set: function (val) {
+                    el.value = "" + clampVal(val);
+                }
+            });
+        }
+
+        // HCA file data
+        const hcaFileData = {
+            // original HCA file content
+            original: {
+                btnID: "downloadbtn",
+                data: {},
+            },
+            // after fixing checksum
+            fixed_checksum: {
+                btnID: "fixcsumbtn",
+                data: {},
+            },
+            // after decryption
+            decrypted: {
+                btnID: "decryptbtn",
+                data: {},
+            },
+            // after encryption
+            encrypted: {
+                btnID: "encryptbtn",
+                data: {},
+            },
+            // after decoding
+            decoded: {
+                btnID: "decodebtn",
+                data: {},
+            },
+        }
+        for (let suffix in hcaFileData) {
+            Object.defineProperty(hcaFileData[suffix], "data", {
+                get: function () {return this.value},
+                set: function (val) {
+                    this.value = null; // clear existing data
+                    const fileExtRegEx = /\.([^\.]+)$/;
+                    let newFileName = fileName.replace(fileExtRegEx, "_" + suffix + ".$1");
+                    if (suffix === "decoded")
+                        newFileName = newFileName.replace(fileExtRegEx, ".wav");
+                    let id = suffix + "-download-link";
+                    let el = document.getElementById(id);
+                    if (el != null) {
+                        // remove existing download link
+                        URL.revokeObjectURL(el.getAttribute("href"));
+                        el.nextSibling.remove();
+                        el.remove();
+                    }
+                    if (val == null) {
+                        console.log(`hcaFileData ${suffix} cleared`);
+                        return; // nothing to create
+                    }
+                    console.log(`hcaFileData ${suffix} byteLength=${val.byteLength}`);
+                    // create new download link
+                    el = document.createElement("a");
+                    el.setAttribute("id", id);
+                    el.setAttribute("download", newFileName);
+                    let extName = newFileName.match(fileExtRegEx)[0];
+                    let mimeType = mimeTypeMap[extName];
+                    if (mimeType == null) mimeType = defMimeType;
+                    el.setAttribute("href", URL.createObjectURL(new Blob([val], {type: mimeType})));
+                    el.innerHTML = newFileName;
+                    let refNode = document.getElementById(hcaFileData[suffix].btnID).nextSibling;
+                    document.body.insertBefore(document.createElement("br"), refNode);
+                    document.body.insertBefore(el, refNode);
+                    // update value
+                    this.value = val;
+                },
+            });
+        }
+        function clearAllData() {
+            for (let suffix in hcaFileData) {
+                hcaFileData[suffix].data = null;
+            }
+            hcaInfoTable.body.data = null;
+            audioElement.src = null;
+            console.log(`cleared all data`);
+        }
+
+        // Audio element
+        const audioElement = {
+            el: document.getElementById("audioElement"),
+            src: ""
+        };
+        Object.defineProperty(audioElement, "src", {
+            get: function () {return this.value},
+            set: function (val) {
+                if (this.value != null && this.value != "")
+                    URL.revokeObjectURL(this.value);
+                if (val == null || val === "") {
+                    this.value = audioElement.el.src = "";
+                    return;
+                }
+                let newUrl;
+                if (val instanceof ArrayBuffer || val.buffer instanceof ArrayBuffer) {
+                    newUrl = URL.createObjectURL(new Blob([val], {type: mimeTypeMap.wav}));
+                } else {
+                    newUrl = val;
+                }
+                this.value = audioElement.el.src = newUrl;
+            }
+        });
+
+        // buttons
+        const buttons = {
+            startworkerbtn: async (self) => {
+                if (worker == null) {
+                    worker = new HCAWorker(hcaJsUrl);
+                    console.log("started background worker");
+                }
+                buttons.shutdownbtn = true;
+            },
+            shutdownbtn: async (self) => {
+                if (worker != null) {
+                    worker.shutdown();
+                    worker = null;
+                    console.log("background worker is now shut down");
+                }
+                buttons.startworkerbtn = true;
+            },
+            loadfilebtn: async (self) => {
+                self.textContent = "loading picked file...";
+                let file = localfile.files[0];
+                let newFileName = file.name;
+                // update fileName
+                fileName = newFileName;
+                // clear all existing data
+                clearAllData();
+                disableWholeFileButtons();
+                // update data
+                let ab = await file.arrayBuffer();
+                hcaFileData.original.data = new Uint8Array(ab);
+                self.textContent = "load picked file (successful)";
+                // let the button bounce
+                self.disabled = false;
+                // next step
+                buttons.infobtn = true;
+                buttons.fixcsumbtn = true;
+            },
+            downloadbtn: async (self) => {
+                self.textContent = "downloading...";
+                let requestUrl = urlinput.value;
+                if (requestUrl === "") {
+                    self = true;
+                    return;
+                }
+                let response = null;
+                try {
+                    response = await fetch(requestUrl);
+                } catch (e) {
+                    console.error(e);
+                    self.textContent = "download (network error)";
+                }
+                if (response.status != 200) {
+                    console.error("download failed,", response);
+                    self.textContent = `download (failed, ${response.status} ${response.statusText})`;
+                    return;
+                }
+                // get filename from Content-Disposition
+                let cd = response.headers.get("Content-Disposition");
+                let newFileName = null;
+                if (cd != null) {
+                    let splitted = cd.split(";");
+                    let cdFileName = splitted.find((substr) => substr.startsWith("filename="));
+                    if (cdFileName != null) {
+                        newFileName = cdFileName.substring("filename=".length)
+                            .replaceAll(" ", "")
+                            .replaceAll("\"", "");
+                    }
+                }
+                // failed to get filename from Content-Disposition, try URL
+                const fileNameRegEx = /[^\/^\\]+$/;
+                if (newFileName == null || newFileName === "") {
+                    let urlFilename = [response.url, requestUrl].find((url) => url != null && url.match(fileNameRegEx));
+                    if (urlFilename != null)
+                        newFileName = urlFilename.match(fileNameRegEx)[0];
+                }
+                // failed to get filename, use default filename
+                if (newFileName == null || newFileName === "") {
+                    newFileName = "downloaded.hca";
+                }
+                // strip query string
+                let stripped = newFileName.match(/^[^\?]+/);
+                if (stripped != null)
+                    newFileName = stripped[0];
+                // update fileName
+                fileName = newFileName;
+                // clear all existing data
+                clearAllData();
+                disableWholeFileButtons();
+                // update data
+                let ab = await response.arrayBuffer();
+                hcaFileData.original.data = new Uint8Array(ab);
+                self.textContent = "download (successful)";
+                // let the button bounce
+                self.disabled = false;
+                // next step
+                buttons.infobtn = true;
+                buttons.fixcsumbtn = true;
+            },
+            infobtn: async (self) => {
+                let hca = hcaFileData[
+                    ["fixed_checksum", "original"].find((suffix) => {
+                        if (hcaFileData[suffix].data != null) {
+                            console.log(`get HCA info from ${suffix} file data`);
+                            return true;
+                        }
+                    })
+                ].data;
+                try {
+                    worker.tick();
+                    let infoPromise = worker.info(hca);
+                    worker.tock("get HCA info");
+                    let info = await infoPromise;
+                    self.textContent = "get HCA info (successful)";
+                    // update table content
+                    hcaInfoTable.body.data = info;
+                    // next step
+                    let isEncrypted = info.hasHeader["ciph"] && info.cipher !=0;
+                    buttons.encryptbtn = !isEncrypted;
+                    buttons.decryptbtn = isEncrypted;
+                    buttons.decodebtn = !isEncrypted;
+                } catch (e) {
+                    console.error(e);
+                    self.textContent = "get HCA info (failed)";
+                }
+                // let the button bounce
+                self.disabled = false;
+            },
+            fixcsumbtn: async (self) => {
+                try {
+                    worker.tick();
+                    let newHcaPromise = worker.fixChecksum(hcaFileData.original.data);
+                    worker.tock("fix checksum");
+                    let newHca = await newHcaPromise;
+                    // update data
+                    hcaFileData.fixed_checksum.data = newHca;
+                    self.textContent = "fix checksum (successful)";
+                } catch (e) {
+                    console.error(e);
+                    self.textContent = "fix checksum (failed)";
+                }
+                // let the button bounce
+                self.disabled = false;
+            },
+            encryptbtn: async (self) => {
+                await encryptOrDecrypt(self, true);
+                // let the button bounce
+                self.disabled = false;
+            },
+            decryptbtn: async (self) => {
+                await encryptOrDecrypt(self, false);
+                // let the button bounce
+                self.disabled = false;
+            },
+            decodebtn: async (self) => {
+                // prepare data
+                let hca = hcaFileData[
+                    ["decrypted", "fixed_checksum", "original"].find((suffix) => {
+                        if (hcaFileData[suffix].data != null) {
+                            console.log(`decoding ${suffix} data...`);
+                            return true;
+                        }
+                    })
+                ].data;
+                // start decoding
+                try {
+                    worker.tick();
+                    let decodedPromise = worker.decode(hca,
+                        decodingParam.mode, decodingParam.loop, decodingParam.volumePerCent / 100);
+                    worker.tock("decoding");
+                    let decoded = await decodedPromise;
+                    // update data
+                    hcaFileData.decoded.data = decoded;
+                    self.textContent = "decode (done)";
+                    // next step (play)
+                    audioElement.src = decoded;
+                } catch (e) {
+                    console.error(e);
+                    self.textContent = "decode (failed)";
+                }
+                // let the button bounce
+                self.disabled = false;
+            },
+        };
+        for (let id in buttons) {
+            let el = document.getElementById(id);
+            let onclick = buttons[id];
+            el.onclick = (ev) => {
+                let self = ev.srcElement;
+                self.disabled = true;
+                onclick(self);
+            }
+            const initialText = el.textContent;
+            Object.defineProperty(buttons, id, {
+                get: function () {return !el.disabled},
+                set: function (val) {
+                    if (val === "click") {
+                        onclick(el);
+                        return;
+                    }
+                    el.textContent = initialText;
+                    el.disabled = !val;
+                },
+            });
+        }
+        buttons.startworkerbtn = "click"; // start background worker
+        function disableWholeFileButtons() {
+            for (let btnID in buttons) {
+                switch (btnID) {
+                    case "startworkerbtn":
+                    case "shutdownbtn":
+                    case "loadfilebtn":
+                    case "downloadbtn":
+                        break;
+                    default:
+                        buttons[btnID] = false;
+                }
+            }
+        }
+        buttons.loadfilebtn = false;
+        disableWholeFileButtons(); // same to above, reset state on refresh
+        async function encryptOrDecrypt(self, isEncrypting) {
+            const action = isEncrypting ? "encrypt" : "decrypt";
+            const opposite = isEncrypting ? "decrypt" : "encrypt";
+            // disable both buttons
+            self.disabled = true;
+            buttons[opposite + "btn"] = false;
+            self.textContent = action + "ing...";
+            // disable decodebtn if necessary
+            if (!isEncrypting)
+                buttons.decodebtn = false
+            // prepare data
+            let hca = hcaFileData[
+                [opposite + "ed", "fixed_checksum", "original"].find((suffix) => {
+                    if (hcaFileData[suffix].data != null) {
+                        console.log(`${action}ing ${suffix} data...`);
+                        return true;
+                    }
+                })
+            ].data;
+            if (isEncrypting && !hcaInfoTable.body.data.hasHeader["ciph"]) {
+                // check for ciph header section
+                console.log("input HCA lacks ciph header section, adding it");
+                hca = await worker.addCipherHeader(hca);
+            } else {
+                hca = hca.slice(0); // just copy to new buffer
+            }
+            // start to encrypt/decrypt
+            try {
+                worker.tick();
+                // although decryption/encryption is done in-place,
+                // however since we are not using SharedArrayBuffer,
+                // the background worker is still actually overwritting a newly allocated buffer
+                let resultPromise = worker[action](hca, keys.key1, keys.key2);
+                worker.tock(isEncrypting ? "encryption" : "decryption");
+                let result = await resultPromise;
+                self.textContent = action + " (done)";
+                // update data
+                hcaFileData[action + "ed"].data = result;
+                // next steps
+                buttons[opposite + "btn"] = true;
+                if (!isEncrypting)
+                    buttons.decodebtn = true;
+            } catch (e) {
+                console.error(e);
+                self.textContent = "Error during " + (isEncrypting ? "encryption" : "decryption");
+            }
+        }
+    </script>
+</body>
+</html>
