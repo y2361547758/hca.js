@@ -680,7 +680,7 @@ class HCA {
         // create new writer if not specified
         let info = frame.Hca;
         if (writer == null) {
-            writer = new Uint8Array(0x400 * info.format.channelCount * mode / 8);
+            writer = new Uint8Array(0x400 * info.format.channelCount * (mode == 0 ? 32 : mode) / 8);
             if (ftell == null) {
                 ftell = 0;
             }
