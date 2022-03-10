@@ -406,14 +406,6 @@ class HCAUtilFunc
         value = ((value & 0xcc) >>> 2) | ((value & 0x33) << 2);
         return (((value & 0xf0) >>> 4) | ((value & 0x0f) << 4)) >>> 0;
     }
-    static SignExtend32(value: number, bits: number): number
-    {
-        if (value > 0x7fffffff) throw new Error("value > 0x7fffffff");
-        if (value < -0x80000000) throw new Error("value < -0x80000000");
-        let shift = 32 - bits;
-        let mask = 0xffffffff >>> shift;
-        return value & mask;
-    }
     static Clamp(value: number, min: number, max: number): number
     {
         if (value < min)
@@ -770,13 +762,6 @@ class HCABitReader {
         let value: number = this.PeekInt(bitCount);
         this.Position += bitCount;
         return value;
-    }
-
-    ReadSignedInt(bitCount: number): number
-    {
-        let value: number = this.PeekInt(bitCount);
-        this.Position += bitCount;
-        return HCAUtilFunc.SignExtend32(value, bitCount);
     }
 
     ReadBool(): boolean {
