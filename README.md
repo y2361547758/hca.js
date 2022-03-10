@@ -1,6 +1,8 @@
 # HCA.js
 
-TypeScript port of [HCADecoder](https://github.com/Nyagamon/HCADecoder.git)
+TypeScript port of [VGAudio](https://github.com/Thealexbarney/VGAudio)'s HCA codec
+
+Thanks to [HCADecoder](https://github.com/Nyagamon/HCADecoder.git)
 
 Decrypt & decode hca(2.0) file in browser.
 
