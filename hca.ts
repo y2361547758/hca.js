@@ -317,7 +317,7 @@ class HCAInfo {
         info = new HCAInfo(newHca);
         return newHca;
     }
-    static addCipherHeader(hca: Uint8Array, cipherType: number | undefined = undefined): Uint8Array {
+    static addCipherHeader(hca: Uint8Array, cipherType?: number): Uint8Array {
         let newData = new Uint8Array(2);
         if (cipherType != null) new DataView(newData.buffer).setUint16(0, cipherType);
         return this.addHeader(hca, "ciph", newData);
@@ -664,7 +664,7 @@ class HCA {
         HCADecoder.DecodeFrame(block, frame);
     }
     static writeToPCM(frame: HCAFrame, mode = 32, volume = 1.0,
-        writer: Uint8Array | undefined = undefined, ftell: number | undefined = undefined): Uint8Array
+        writer?: Uint8Array, ftell?: number): Uint8Array
     {
         switch (mode) {
             case 0: // float
@@ -2080,7 +2080,7 @@ class HCACrc16 {
             sum = ((sum << 8) ^ this._v[(sum >> 8) ^ data[i]]) & 0x0000ffff;
         return sum & 0x0000ffff;
     }
-    static verify(data: Uint8Array, size: number, expected: number | undefined = undefined, doNotThrow = false): boolean {
+    static verify(data: Uint8Array, size: number, expected?: number, doNotThrow = false): boolean {
         if (expected == null) {
             expected = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint16(size);
         }
@@ -2431,7 +2431,7 @@ class HCAWorker {
         console.log(`${text} took ${new Date().getTime() - this.lastTick} ms`);
         return duration;
     }
-    constructor (selfUrl: URL, errHandlerCallback: Function | undefined) {
+    constructor (selfUrl: URL, errHandlerCallback?: Function) {
         this.selfUrl = selfUrl;
         this.cmdQueue = [];
         this.resultCallback = {};
@@ -2460,7 +2460,7 @@ class HCAWorker {
     async addHeader(hca: Uint8Array, sig: string, newData: Uint8Array): Promise<Uint8Array> {
         return await this.sendCmd("addHeader", [hca, sig, newData]);
     }
-    async addCipherHeader(hca: Uint8Array, cipherType: number | undefined = undefined): Promise<Uint8Array> {
+    async addCipherHeader(hca: Uint8Array, cipherType?: number): Promise<Uint8Array> {
         return await this.sendCmd("addCipherHeader", [hca, cipherType]);
     }
     async decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0): Promise<Uint8Array> {
