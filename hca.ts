@@ -518,7 +518,7 @@ class HCA {
             }
             let startOffset = info.dataOffset + info.blockSize * i;
             let block = hca.subarray(startOffset, startOffset + info.blockSize);
-            this.decodeBlock(frame, block, mode);
+            this.decodeBlock(frame, block);
             let wavebuff: Uint8Array;
             if (lastDecodedSamples < info.startAtSample || currentDecodedSamples > actualEndAtSample) {
                 // crossing startAtSample/endAtSample, skip/drop specified bytes
@@ -554,15 +554,8 @@ class HCA {
         return fileBuf;
     }
 
-    static decodeBlock(frame: HCAFrame, block: Uint8Array, mode = 32): void
+    static decodeBlock(frame: HCAFrame, block: Uint8Array): void
     {
-        switch (mode) {
-            case 0: // float
-            case 8: case 16: case 24: case 32: // integer
-                break;
-            default:
-                mode = 32;
-        }
         let info = frame.Hca;
         if (block.byteLength != info.blockSize) throw new Error("block.byteLength != info.blockSize");
         // verify checksum
