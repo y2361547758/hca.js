@@ -54,6 +54,9 @@ class HCAInfo {
     endAtSample = 0;
     loopStartAtSample = 0;
     loopEndAtSample = 0;
+    // full file size / data part (excluding header, just blocks/frames) size
+    fullSize = 0;
+    dataSize = 0;
     private static getSign(raw: DataView, offset = 0, changeMask: boolean, encrypt: boolean) {
         let magic = raw.getUint32(offset, true);
         let strLen = 4;
@@ -218,6 +221,9 @@ class HCAInfo {
             this.loopStartAtSample = this.loop.start * 0x400 + this.loop.droppedHeader;
             this.loopEndAtSample = (this.loop.end + 1) * 0x400 - this.loop.droppedFooter;
         }
+        // calculate file/data size
+        this.dataSize = this.blockSize * this.format.blockCount;
+        this.fullSize = this.dataOffset + this.dataSize;
         if (changeMask || hasModDone) {
             // fix checksum if requested
             HCACrc16.fix(hca, this.dataOffset - 2);
