@@ -214,12 +214,12 @@ class HCAInfo {
             this.HfrGroupCount = HCAUtilFunc.DivideByRoundUp(this.compDec.HfrBandCount, this.compDec.BandsPerHfrGroup);
         }
         // calculate sample count/offsets
-        this.fullSampleCount = this.format.blockCount * 0x400;
+        this.fullSampleCount = this.format.blockCount * HCAFrame.SamplesPerFrame;
         this.startAtSample = this.format.droppedHeader;
         this.endAtSample = this.fullSampleCount - this.format.droppedFooter;
         if (this.hasHeader["loop"]) {
-            this.loopStartAtSample = this.loop.start * 0x400 + this.loop.droppedHeader;
-            this.loopEndAtSample = (this.loop.end + 1) * 0x400 - this.loop.droppedFooter;
+            this.loopStartAtSample = this.loop.start * HCAFrame.SamplesPerFrame + this.loop.droppedHeader;
+            this.loopEndAtSample = (this.loop.end + 1) * HCAFrame.SamplesPerFrame - this.loop.droppedFooter;
         }
         // calculate file/data size
         this.dataSize = this.blockSize * this.format.blockCount;
@@ -551,7 +551,7 @@ class HCA {
             note.size = 4 + info.comment.length;
             if (note.size & 3) note.size += 4 - note.size & 3
         }
-        let blockSizeInWav = 0x400 * fmt.fmtSamplingSize;
+        let blockSizeInWav = HCAFrame.SamplesPerFrame * fmt.fmtSamplingSize;
         data.size = info.hasHeader["loop"]
             ? ((info.loopStartAtSample - info.startAtSample) + (info.loopEndAtSample - info.loopStartAtSample) * (loop + 1)) * fmt.fmtSamplingSize
             : (info.endAtSample - info.startAtSample) * fmt.fmtSamplingSize;
@@ -583,8 +583,8 @@ class HCA {
         ftell += 8;
         let actualEndAtSample = info.hasHeader["loop"] ? info.loopEndAtSample : info.endAtSample;
         for (let l = 0; l < info.format.blockCount; ++l) {
-            let lastDecodedSamples = l * 0x400;
-            let currentDecodedSamples = lastDecodedSamples + 0x400;
+            let lastDecodedSamples = l * HCAFrame.SamplesPerFrame;
+            let currentDecodedSamples = lastDecodedSamples + HCAFrame.SamplesPerFrame;
             if (currentDecodedSamples <= info.startAtSample || lastDecodedSamples >= actualEndAtSample) {
                 continue;
             }
@@ -678,7 +678,7 @@ class HCA {
         // create new writer if not specified
         let info = frame.Hca;
         if (writer == null) {
-            writer = new Uint8Array(0x400 * info.format.channelCount * (mode == 0 ? 32 : mode) / 8);
+            writer = new Uint8Array(HCAFrame.SamplesPerFrame * info.format.channelCount * (mode == 0 ? 32 : mode) / 8);
             if (ftell == null) {
                 ftell = 0;
             }
