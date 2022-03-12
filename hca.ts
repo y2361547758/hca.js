@@ -491,104 +491,32 @@ class HCA {
         }
         if (volume > 1) volume = 1;
         else if (volume < 0) volume = 0;
+
         let info = new HCAInfo(hca); // throws "Not a HCA file" if mismatch
         let frame = new HCAFrame(info);
+
         if (info.hasHeader["ciph"] && info.cipher != 0) {
             throw new Error("HCA is encrypted, please decrypt it first before decoding");
         }
-        let wavRiff = {
-            id: 0x46464952, // RIFF
-            size: 0,
-            wave: 0x45564157 // WAVE
-        }
-        let fmt = {
-            id: 0x20746d66, // fmt 
-            size: 0x10,
-            fmtType: mode > 0 ? 1 : 3,
-            fmtChannelCount: info.format.channelCount,
-            fmtSamplingRate: info.format.samplingRate,
-            fmtSamplesPerSec: 0,
-            fmtSamplingSize: 0,
-            fmtBitCount: mode > 0 ? mode : 32
-        }
-        fmt.fmtSamplingSize = fmt.fmtBitCount / 8 * fmt.fmtChannelCount;
-        fmt.fmtSamplesPerSec = fmt.fmtSamplingRate * fmt.fmtSamplingSize;
-        let smpl = {
-            id: 0x6c706d73, // smpl
-            size: 0x3C,
-            manufacturer: 0,
-            product: 0,
-            samplePeriod: 0,
-            MIDIUnityNote: 0x3C,
-            MIDIPitchFraction: 0,
-            SMPTEFormat: 0,
-            SMPTEOffset: 0,
-            sampleLoops: 1,
-            samplerData: 0x18,
-            loop_Identifier: 0,
-            loop_Type: 0,
-            loop_Start: 0,
-            loop_End: 0,
-            loop_Fraction: 0,
-            loop_PlayCount: 0
-        }
-        let note = {
-            id: 0x65746f6e, // note
-            size: 0,
-            dwName: 0
-        }
-        let data = {
-            id: 0x61746164, // data
-            size: 0
-        }
-        smpl.samplePeriod = (1 / fmt.fmtSamplingRate * 1000000000);
-        if (info.hasHeader["loop"]) {
-            smpl.loop_Start = info.loopStartAtSample - info.startAtSample;
-            smpl.loop_End = info.loopEndAtSample - info.startAtSample;
-            smpl.SMPTEOffset = 1;
-        }
-        if (info.comment) {
-            note.size = 4 + info.comment.length;
-            if (note.size & 3) note.size += 4 - note.size & 3
-        }
-        let blockSizeInWav = HCAFrame.SamplesPerFrame * fmt.fmtSamplingSize;
-        data.size = info.hasHeader["loop"]
-            ? ((info.loopStartAtSample - info.startAtSample) + (info.loopEndAtSample - info.loopStartAtSample) * (loop + 1)) * fmt.fmtSamplingSize
-            : (info.endAtSample - info.startAtSample) * fmt.fmtSamplingSize;
-        wavRiff.size = 0x1C + (info.comment ? 8 + note.size : 0) + 8 + data.size + (info.hasHeader["loop"] ? 68 : 0);
-        let writer = new Uint8Array(wavRiff.size + 8);
-        let p = new DataView(writer.buffer);
-        let ftell = 0;
-        p.setUint32(0, wavRiff.id, true);
-        p.setUint32(4, wavRiff.size, true);
-        p.setUint32(8, wavRiff.wave, true);
-        p.setUint32(12, fmt.id, true);
-        p.setUint32(16, fmt.size, true);
-        p.setUint16(20, fmt.fmtType, true);
-        p.setUint16(22, fmt.fmtChannelCount, true);
-        p.setUint32(24, fmt.fmtSamplingRate, true);
-        p.setUint32(28, fmt.fmtSamplesPerSec, true);
-        p.setUint16(32, fmt.fmtSamplingSize, true);
-        p.setUint16(34, fmt.fmtBitCount, true);
-        ftell += 36;
-        if (info.comment) {
-            p.setUint32(ftell, note.id, true);
-            p.setUint32(ftell + 4, note.size, true);
-            let te = new TextEncoder();
-            writer.set(te.encode(info.comment), ftell + 8);
-            ftell += note.size;
-        }
-        p.setUint32(ftell, data.id, true);
-        p.setUint32(ftell + 4, data.size, true);
-        ftell += 8;
-        let actualEndAtSample = info.hasHeader["loop"] ? info.loopEndAtSample : info.endAtSample;
-        for (let l = 0; l < info.format.blockCount; ++l) {
-            let lastDecodedSamples = l * HCAFrame.SamplesPerFrame;
+
+        // prepare output WAV file
+        const outputWav = new HCAWav(info, mode, loop);
+        const fileBuf = outputWav.fileBuf;
+        const dataPart = outputWav.dataPart;
+
+        // calculate needed constants
+        const samplingSize = outputWav.fmt.blockAlign;
+        const blockSizeInWav = outputWav.fmt.blockAlign * HCAFrame.SamplesPerFrame;
+        const actualEndAtSample = info.hasHeader["loop"] ? info.loopEndAtSample : info.endAtSample;
+
+        // decode blocks (frames)
+        for (let i = 0, offset = 0; i < info.format.blockCount; i++) {
+            let lastDecodedSamples = i * HCAFrame.SamplesPerFrame;
             let currentDecodedSamples = lastDecodedSamples + HCAFrame.SamplesPerFrame;
             if (currentDecodedSamples <= info.startAtSample || lastDecodedSamples >= actualEndAtSample) {
                 continue;
             }
-            let startOffset = info.dataOffset + info.blockSize * l;
+            let startOffset = info.dataOffset + info.blockSize * i;
             let block = hca.subarray(startOffset, startOffset + info.blockSize);
             this.decodeBlock(frame, block, mode);
             let wavebuff: Uint8Array;
@@ -596,55 +524,34 @@ class HCA {
                 // crossing startAtSample/endAtSample, skip/drop specified bytes
                 wavebuff = this.writeToPCM(frame, mode, volume);
                 if (lastDecodedSamples < info.startAtSample) {
-                    let skippedSize = (info.startAtSample - lastDecodedSamples) * fmt.fmtSamplingSize;
+                    let skippedSize = (info.startAtSample - lastDecodedSamples) * samplingSize;
                     wavebuff = wavebuff.subarray(skippedSize, blockSizeInWav);
                 } else if (currentDecodedSamples > actualEndAtSample) {
-                    let writeSize = (actualEndAtSample - lastDecodedSamples) * fmt.fmtSamplingSize;
+                    let writeSize = (actualEndAtSample - lastDecodedSamples) * samplingSize;
                     wavebuff = wavebuff.subarray(0, writeSize);
                 } else throw Error("should never go here");
-                writer.set(wavebuff, ftell);
+                dataPart.set(wavebuff, offset);
             } else {
-                wavebuff = this.writeToPCM(frame, mode, volume, writer, ftell);
+                wavebuff = this.writeToPCM(frame, mode, volume, dataPart, offset);
             }
-            ftell += wavebuff.byteLength;
+            offset += wavebuff.byteLength;
         }
+
         // decoding done, then just copy looping part
         if (info.hasHeader["loop"] && loop) {
             // "tail" beyond loop end is dropped
             // copy looping audio clips
-            let wavDataOffset = writer.byteLength - data.size - 68;
-            let loopSizeInWav = (info.loopEndAtSample - info.loopStartAtSample) * fmt.fmtSamplingSize;
-            let preLoopSizeInWav = (info.loopStartAtSample - info.startAtSample) * fmt.fmtSamplingSize;
-            let loopStartOffsetInWav = wavDataOffset + preLoopSizeInWav;
-            let src = new Uint8Array(writer.buffer, writer.byteOffset + loopStartOffsetInWav, loopSizeInWav);
-            for (let i = 1; i <= loop; i++) {
-                let dst = new Uint8Array(writer.buffer, writer.byteOffset + loopStartOffsetInWav + i * loopSizeInWav, loopSizeInWav);
+            let loopSizeInWav = samplingSize * (info.loopEndAtSample - info.loopStartAtSample);
+            let preLoopSizeInWav = samplingSize * (info.loopStartAtSample - info.startAtSample);
+            let src = dataPart.subarray(preLoopSizeInWav, preLoopSizeInWav + loopSizeInWav);
+            for (let i = 0, start = preLoopSizeInWav + loopSizeInWav; i < loop; i++) {
+                let dst = dataPart.subarray(start, start + loopSizeInWav);
                 dst.set(src);
-                ftell += dst.byteLength;
+                start += loopSizeInWav;
             }
         }
-        if (info.hasHeader["loop"]) {
-            // write smpl section
-            p.setUint32(ftell, smpl.id, true);
-            p.setUint32(ftell + 4, smpl.size, true);
-            p.setUint32(ftell + 8, smpl.manufacturer, true);
-            p.setUint32(ftell + 12, smpl.product, true);
-            p.setUint32(ftell + 16, smpl.samplePeriod, true);
-            p.setUint32(ftell + 20, smpl.MIDIUnityNote, true);
-            p.setUint32(ftell + 24, smpl.MIDIPitchFraction, true);
-            p.setUint32(ftell + 28, smpl.SMPTEFormat, true);
-            p.setUint32(ftell + 32, smpl.SMPTEOffset, true);
-            p.setUint32(ftell + 36, smpl.sampleLoops, true);
-            p.setUint32(ftell + 40, smpl.samplerData, true);
-            p.setUint32(ftell + 44, smpl.loop_Identifier, true);
-            p.setUint32(ftell + 48, smpl.loop_Type, true);
-            p.setUint32(ftell + 52, smpl.loop_Start, true);
-            p.setUint32(ftell + 56, smpl.loop_End, true);
-            p.setUint32(ftell + 60, smpl.loop_Fraction, true);
-            p.setUint32(ftell + 64, smpl.loop_PlayCount, true);
-            ftell += 68;
-        }
-        return writer;
+
+        return fileBuf;
     }
 
     static decodeBlock(frame: HCAFrame, block: Uint8Array, mode = 32): void
@@ -688,7 +595,7 @@ class HCA {
             }
         }
         // write decoded data into writer
-        let p = new DataView(writer.buffer);
+        let p = new DataView(writer.buffer, writer.byteOffset, writer.byteLength);
         let ftellBegin = ftell;
         for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
             for (let s = 0; s < HCAFrame.SamplesPerSubFrame; s++) {
@@ -731,7 +638,7 @@ class HCA {
                 }
             }
         }
-        return new Uint8Array(writer.buffer, ftellBegin, ftell - ftellBegin);
+        return writer.subarray(ftellBegin, ftell);
     }
 
     static fixChecksum(hca: Uint8Array): Uint8Array {
@@ -743,6 +650,210 @@ class HCA {
             HCACrc16.fix(block, info.blockSize - 2);
         }
         return hca;
+    }
+}
+class HCAWav
+{
+    readonly fileBuf: Uint8Array;
+    readonly dataPart: Uint8Array;
+    readonly waveRiff: HCAWavWaveRiffHeader;
+    readonly fmt: HCAWavFmtChunk;
+    readonly note?: HCAWavCommentChunk;
+    readonly smpl?: HCAWaveSmplChunk;
+    constructor (info: HCAInfo, mode = 32, loop = 0) {
+        switch (mode) {
+            case 0: // float
+            case 8: case 16: case 24: case 32: // integer
+                break;
+            default:
+                mode = 32;
+        }
+        if (isNaN(loop)) throw new Error("loop is not number");
+        loop = Math.floor(loop);
+        if (loop < 0) throw new Error("loop < 0");
+
+        let bitCount =  mode > 0 ? mode : 32;
+        let channelCount = info.format.channelCount;
+        let samplingSize = bitCount / 8 * channelCount;
+        let sampleCount = info.hasHeader["loop"] ? info.loopEndAtSample : info.fullSampleCount - info.format.droppedFooter;
+        sampleCount -= info.format.droppedHeader;
+        let dataSize = samplingSize * sampleCount;
+        if (loop > 0) {
+            let loopSizeInWav = samplingSize * (info.loopEndAtSample - info.loopStartAtSample);
+            dataSize += loopSizeInWav * loop;
+        }
+
+        // prepare metadata chunks and data chunk header
+        this.fmt = new HCAWavFmtChunk(info, mode);
+        if (info.hasHeader["comm"]) this.note = new HCAWavCommentChunk(info);
+        if (info.hasHeader["loop"]) this.smpl = new HCAWaveSmplChunk(info);
+        this.waveRiff = new HCAWavWaveRiffHeader(
+              8 + this.fmt.size
+            + (this.note == null ? 0 : 8 + this.note.size)
+            + 8 + dataSize
+            + (this.smpl == null ? 0 : 8 + this.smpl.size)
+        );
+
+        // get bytes of prepared chunks
+        let waveRiffHeader = this.waveRiff.get();
+        let fmtChunk = this.fmt.get();
+        let noteChunk = this.note != null ? this.note.get() : new Uint8Array(0);
+        let dataChunkHeader = new Uint8Array(8);
+        dataChunkHeader.set(new TextEncoder().encode("data"));
+        new DataView(dataChunkHeader.buffer).setUint32(4, dataSize, true);
+        let smplChunk = this.smpl != null ? this.smpl.get() : new Uint8Array(0);
+
+        // create whole-file buffer
+        this.fileBuf = new Uint8Array(8 + this.waveRiff.size);
+        // copy prepared metadata chunks and data chunk header to whole-file buffer
+        let writtenLength = 0;
+        [waveRiffHeader, fmtChunk, noteChunk, dataChunkHeader].forEach((chunk) => {
+            this.fileBuf.set(chunk, writtenLength);
+            writtenLength += chunk.byteLength;
+        });
+        // skip dataPart since it's empty
+        this.dataPart = this.fileBuf.subarray(writtenLength, writtenLength + dataSize);
+        writtenLength += dataSize;
+        // copy the last prepared chunk to whole-file buffer
+        this.fileBuf.set(smplChunk, writtenLength);
+        writtenLength += smplChunk.byteLength;
+
+        if (writtenLength != this.fileBuf.byteLength) throw new Error("writtenLength != this.fileBuf.byteLength");
+    }
+}
+class HCAWavWaveRiffHeader
+{
+    readonly size: number;
+    constructor (size: number) {
+        if (isNaN(size)) throw new Error("size must be number");
+        size = Math.floor(size);
+        if (size <= 0) throw new Error("size <= 0");
+        this.size = 4 + size; // "WAVE" + remaining part
+    }
+    get(): Uint8Array {
+        let buf = new ArrayBuffer(12);
+        let ret = new Uint8Array(buf);
+        let p = new DataView(buf);
+        let te = new TextEncoder();
+        ret.set(te.encode("RIFF"), 0);
+        p.setUint32(4, this.size, true);
+        ret.set(te.encode("WAVE"), 8);
+        return ret;
+    }
+}
+class HCAWavFmtChunk
+{
+    readonly size = 16;
+    readonly formatTag: number;
+    readonly channelCount: number;
+    readonly samplesPerSec: number;
+    readonly bytesPerSec: number;
+    readonly blockAlign: number;
+    readonly bitsPerSample: number;
+    constructor (info: HCAInfo, mode = 32) {
+        switch (mode) {
+            case 0: // float
+            case 8: case 16: case 24: case 32: // integer
+                break;
+            default:
+                mode = 32;
+        }
+        let bitCount =  mode > 0 ? mode : 32;
+        let channelCount = info.format.channelCount;
+        let samplingSize = bitCount / 8 * channelCount;
+        this.formatTag = mode > 0 ? 1 : 3;
+        this.channelCount = channelCount;
+        this.samplesPerSec = info.format.samplingRate;
+        this.bytesPerSec = samplingSize * this.samplesPerSec;
+        this.blockAlign = samplingSize;
+        this.bitsPerSample = bitCount;
+    }
+    get(): Uint8Array {
+        let buf = new ArrayBuffer(8 + this.size);
+        let ret = new Uint8Array(buf);
+        let p = new DataView(buf);
+        let te = new TextEncoder();
+        ret.set(te.encode("fmt "), 0);
+        p.setUint32(4, this.size, true);
+        p.setUint16(8, this.formatTag, true);
+        p.setUint16(10, this.channelCount, true);
+        p.setUint32(12, this.samplesPerSec, true);
+        p.setUint32(16, this.bytesPerSec, true);
+        p.setUint16(20, this.blockAlign, true);
+        p.setUint16(22, this.bitsPerSample, true);
+        return ret;
+    }
+}
+class HCAWavCommentChunk
+{
+    readonly size: number;
+    readonly commentBuf: Uint8Array;
+    constructor (info: HCAInfo) {
+        this.commentBuf = new TextEncoder().encode(info.comment);
+        let size = this.commentBuf.byteLength;
+        size += 4;
+        if (size % 4) size += 4 - size % 4;
+        this.size = size;
+    }
+    get(): Uint8Array {
+        let buf = new ArrayBuffer(8 + this.size);
+        let ret = new Uint8Array(buf);
+        let p = new DataView(buf);
+        let te = new TextEncoder();
+        ret.set(te.encode("note"), 0);
+        p.setUint32(4, this.size, true);
+        ret.set(this.commentBuf, 8);
+        return ret;
+    }
+}
+class HCAWaveSmplChunk
+{
+    readonly size = 60;
+    readonly manufacturer = 0;
+    readonly product = 0;
+    readonly samplePeriod: number;
+    readonly MIDIUnityNote = 0x3c;
+    readonly MIDIPitchFraction = 0;
+    readonly SMPTEFormat = 0;
+    readonly SMPTEOffset: number;
+    readonly sampleLoops = 1;
+    readonly samplerData = 0x18;
+    readonly loop_Identifier = 0;
+    readonly loop_Type = 0;
+    readonly loop_Start: number;
+    readonly loop_End: number;
+    readonly loop_Fraction = 0;
+    readonly loop_PlayCount= 0;
+    constructor (info: HCAInfo) {
+        if (!info.hasHeader["loop"]) throw new Error("missing \"loop\" header");
+        this.samplePeriod = (1 / info.format.samplingRate * 1000000000);
+        this.loop_Start = info.loopStartAtSample - info.startAtSample;
+        this.loop_End = info.loopEndAtSample - info.startAtSample;
+        this.SMPTEOffset = 1;
+    }
+    get(): Uint8Array {
+        let buf = new ArrayBuffer(8 + this.size);
+        let ret = new Uint8Array(buf);
+        let p = new DataView(buf);
+        let te = new TextEncoder();
+        ret.set(te.encode("smpl"), 0);
+        p.setUint32(4, this.size, true);
+        p.setUint32(8, this.manufacturer, true);
+        p.setUint32(12, this.product, true);
+        p.setUint32(16, this.samplePeriod, true);
+        p.setUint32(20, this.MIDIUnityNote, true);
+        p.setUint32(24, this.MIDIPitchFraction, true);
+        p.setUint32(28, this.SMPTEFormat, true);
+        p.setUint32(32, this.SMPTEOffset, true);
+        p.setUint32(36, this.sampleLoops, true);
+        p.setUint32(40, this.samplerData, true);
+        p.setUint32(44, this.loop_Identifier, true);
+        p.setUint32(48, this.loop_Type, true);
+        p.setUint32(52, this.loop_Start, true);
+        p.setUint32(56, this.loop_End, true);
+        p.setUint32(60, this.loop_Fraction, true);
+        p.setUint32(64, this.loop_PlayCount, true);
+        return ret;
     }
 }
 
