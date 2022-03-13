@@ -51,12 +51,17 @@ class HCAInfo {
     HfrGroupCount = 0;
     fullSampleCount = 0;
     startAtSample = 0;
-    endAtSample = 0;
+    fullEndAtSample = 0;
     loopStartAtSample = 0;
     loopEndAtSample = 0;
+    loopSampleCount = 0;
+    endAtSample = 0;
+    sampleCount = 0;
     // full file size / data part (excluding header, just blocks/frames) size
     fullSize = 0;
     dataSize = 0;
+    // depends on decoding mode (bit count)
+    inWavSize?: HCAInfoInWavSize;
     private static getSign(raw: DataView, offset = 0, changeMask: boolean, encrypt: boolean) {
         let magic = raw.getUint32(offset, true);
         let strLen = 4;
@@ -216,11 +221,14 @@ class HCAInfo {
         // calculate sample count/offsets
         this.fullSampleCount = this.format.blockCount * HCAFrame.SamplesPerFrame;
         this.startAtSample = this.format.droppedHeader;
-        this.endAtSample = this.fullSampleCount - this.format.droppedFooter;
+        this.fullEndAtSample = this.fullSampleCount - this.format.droppedFooter;
         if (this.hasHeader["loop"]) {
             this.loopStartAtSample = this.loop.start * HCAFrame.SamplesPerFrame + this.loop.droppedHeader;
             this.loopEndAtSample = (this.loop.end + 1) * HCAFrame.SamplesPerFrame - this.loop.droppedFooter;
+            this.loopSampleCount = this.loopEndAtSample - this.loopStartAtSample;
         }
+        this.endAtSample = this.hasHeader["loop"] ? this.loopEndAtSample : this.fullEndAtSample;
+        this.sampleCount = this.endAtSample - this.startAtSample;
         // calculate file/data size
         this.dataSize = this.blockSize * this.format.blockCount;
         this.fullSize = this.dataOffset + this.dataSize;
@@ -238,8 +246,8 @@ class HCAInfo {
             this.blockSize > 0,
             0 < this.format.blockCount,
             0 <= this.startAtSample,
-            this.startAtSample < this.endAtSample,
-            this.endAtSample <= this.fullSampleCount,
+            this.startAtSample < this.fullEndAtSample,
+            this.fullEndAtSample <= this.fullSampleCount,
         ];
         results.find((result, index) => {
             if (!result) {
@@ -250,7 +258,7 @@ class HCAInfo {
             const loopChecks: Array<boolean> = [
                 this.startAtSample <= this.loopStartAtSample,
                 this.loopStartAtSample < this.loopEndAtSample,
-                this.loopEndAtSample <= this.endAtSample,
+                this.loopEndAtSample <= this.fullEndAtSample,
             ];
             loopChecks.find((result, index) => {
                 if (!result) {
@@ -332,9 +340,53 @@ class HCAInfo {
         HCACrc16.fix(hca, dataOffset - 2);
         return hca;
     }
+    calcInWavSize(mode = 32): HCAInfoInWavSize {
+        switch (mode) {
+            case 0: // float
+            case 8: case 16: case 24: case 32: // integer
+                break;
+            default:
+                mode = 32;
+        }
+        let bitsPerSample = mode == 0 ? 32 : mode;
+        let sampleSizeInWav = this.format.channelCount * bitsPerSample / 8;
+        return this.inWavSize = {
+            bitsPerSample: bitsPerSample,
+            sample: sampleSizeInWav,
+            block: HCAFrame.SamplesPerFrame * sampleSizeInWav,
+            dropped: {
+                header: this.format.droppedHeader * sampleSizeInWav,
+                footer: this.format.droppedFooter * sampleSizeInWav,
+            },
+            loop: this.hasHeader["loop"] ? {
+                loopPart: (this.loopEndAtSample - this.loopStartAtSample) * sampleSizeInWav,
+                dropped: {
+                    header: this.loop.droppedHeader * sampleSizeInWav,
+                    footer: this.loop.droppedFooter * sampleSizeInWav,
+                }
+            } : undefined,
+        }
+    }
     constructor (hca: Uint8Array, changeMask: boolean = false, encrypt: boolean = false) {
         // if changeMask == true, (un)mask the header sigs in-place
         this.rawHeader = this.parseHeader(hca, changeMask, encrypt, {});
+    }
+}
+interface HCAInfoInWavSize
+{
+    bitsPerSample: number,
+    sample: number,
+    block: number,
+    dropped: {
+        header: number,
+        footer: number,
+    }
+    loop?: {
+        loopPart: number,
+        dropped: {
+            header: number,
+            footer: number,
+        }
     }
 }
 
@@ -504,30 +556,28 @@ class HCA {
         const fileBuf = outputWav.fileBuf;
         const dataPart = outputWav.dataPart;
 
-        // calculate needed constants
-        const samplingSize = outputWav.fmt.blockAlign;
-        const blockSizeInWav = outputWav.fmt.blockAlign * HCAFrame.SamplesPerFrame;
-        const actualEndAtSample = info.hasHeader["loop"] ? info.loopEndAtSample : info.endAtSample;
+        // calculate in-WAV size
+        let inWavSize = info.calcInWavSize(mode);
 
         // decode blocks (frames)
         for (let i = 0, offset = 0; i < info.format.blockCount; i++) {
             let lastDecodedSamples = i * HCAFrame.SamplesPerFrame;
             let currentDecodedSamples = lastDecodedSamples + HCAFrame.SamplesPerFrame;
-            if (currentDecodedSamples <= info.startAtSample || lastDecodedSamples >= actualEndAtSample) {
+            if (currentDecodedSamples <= info.startAtSample || lastDecodedSamples >= info.endAtSample) {
                 continue;
             }
             let startOffset = info.dataOffset + info.blockSize * i;
             let block = hca.subarray(startOffset, startOffset + info.blockSize);
             this.decodeBlock(frame, block);
             let wavebuff: Uint8Array;
-            if (lastDecodedSamples < info.startAtSample || currentDecodedSamples > actualEndAtSample) {
+            if (lastDecodedSamples < info.startAtSample || currentDecodedSamples > info.endAtSample) {
                 // crossing startAtSample/endAtSample, skip/drop specified bytes
                 wavebuff = this.writeToPCM(frame, mode, volume);
                 if (lastDecodedSamples < info.startAtSample) {
-                    let skippedSize = (info.startAtSample - lastDecodedSamples) * samplingSize;
-                    wavebuff = wavebuff.subarray(skippedSize, blockSizeInWav);
-                } else if (currentDecodedSamples > actualEndAtSample) {
-                    let writeSize = (actualEndAtSample - lastDecodedSamples) * samplingSize;
+                    let skippedSize = (info.startAtSample - lastDecodedSamples) * inWavSize.sample;
+                    wavebuff = wavebuff.subarray(skippedSize, inWavSize.block);
+                } else if (currentDecodedSamples > info.endAtSample) {
+                    let writeSize = (info.endAtSample - lastDecodedSamples) * inWavSize.sample;
                     wavebuff = wavebuff.subarray(0, writeSize);
                 } else throw Error("should never go here");
                 dataPart.set(wavebuff, offset);
@@ -541,13 +591,13 @@ class HCA {
         if (info.hasHeader["loop"] && loop) {
             // "tail" beyond loop end is dropped
             // copy looping audio clips
-            let loopSizeInWav = samplingSize * (info.loopEndAtSample - info.loopStartAtSample);
-            let preLoopSizeInWav = samplingSize * (info.loopStartAtSample - info.startAtSample);
-            let src = dataPart.subarray(preLoopSizeInWav, preLoopSizeInWav + loopSizeInWav);
-            for (let i = 0, start = preLoopSizeInWav + loopSizeInWav; i < loop; i++) {
-                let dst = dataPart.subarray(start, start + loopSizeInWav);
+            if (inWavSize.loop == null) throw new Error("inWavSize.loop == null");
+            let preLoopSizeInWav = inWavSize.sample * (info.loopStartAtSample - info.startAtSample);
+            let src = dataPart.subarray(preLoopSizeInWav, preLoopSizeInWav + inWavSize.loop.loopPart);
+            for (let i = 0, start = preLoopSizeInWav + inWavSize.loop.loopPart; i < loop; i++) {
+                let dst = dataPart.subarray(start, start + inWavSize.loop.loopPart);
                 dst.set(src);
-                start += loopSizeInWav;
+                start += inWavSize.loop.loopPart;
             }
         }
 
@@ -665,15 +715,11 @@ class HCAWav
         loop = Math.floor(loop);
         if (loop < 0) throw new Error("loop < 0");
 
-        let bitCount =  mode > 0 ? mode : 32;
-        let channelCount = info.format.channelCount;
-        let samplingSize = bitCount / 8 * channelCount;
-        let sampleCount = info.hasHeader["loop"] ? info.loopEndAtSample : info.fullSampleCount - info.format.droppedFooter;
-        sampleCount -= info.format.droppedHeader;
-        let dataSize = samplingSize * sampleCount;
+        let inWavSize = info.calcInWavSize(mode);
+        let dataSize = inWavSize.sample * info.sampleCount;
         if (loop > 0) {
-            let loopSizeInWav = samplingSize * (info.loopEndAtSample - info.loopStartAtSample);
-            dataSize += loopSizeInWav * loop;
+            if (inWavSize.loop == null) throw new Error("inWavSize.loop == null");
+            dataSize += inWavSize.loop.loopPart * loop;
         }
 
         // prepare metadata chunks and data chunk header
@@ -751,15 +797,13 @@ class HCAWavFmtChunk
             default:
                 mode = 32;
         }
-        let bitCount =  mode > 0 ? mode : 32;
-        let channelCount = info.format.channelCount;
-        let samplingSize = bitCount / 8 * channelCount;
+        let inWavSize = info.calcInWavSize(mode);
         this.formatTag = mode > 0 ? 1 : 3;
-        this.channelCount = channelCount;
+        this.channelCount = info.format.channelCount;
         this.samplesPerSec = info.format.samplingRate;
-        this.bytesPerSec = samplingSize * this.samplesPerSec;
-        this.blockAlign = samplingSize;
-        this.bitsPerSample = bitCount;
+        this.bytesPerSec = inWavSize.sample * info.format.samplingRate;
+        this.blockAlign = inWavSize.sample;
+        this.bitsPerSample = inWavSize.bitsPerSample;
     }
     get(): Uint8Array {
         let buf = new ArrayBuffer(8 + this.size);
