@@ -106,7 +106,7 @@ Return decoded (Windows PCM) WAV of the input whole HCA file. **The input HCA mu
  
  - Return the modifed HCA.
 
-### `HCAInfo.addCipherHeader(hca: Uint8Array, cipherType: number | undefined = undefined): Uint8Array`
+### `HCAInfo.addCipherHeader(hca: Uint8Array, cipherType?: number): Uint8Array`
 
  - Return a new HCA **in a newly allocated buffer** which is the input HCA with a newly added `ciph` header section.
 
@@ -175,11 +175,12 @@ async function decryptAndDecode(hca) {
     let worker = new HCAWorker(hcaUrl);
     let decrypted = await worker.decrypt(hca.slice(0), "defaultkey");
     let wav = await worker.decode(decrypted, 16);
+    await worker.shutdown();
     return wav;
 }
 ```
 
-### `new HCAWorker(selfUrl: URL, errHandlerCallback: Function | undefined)`
+### `new HCAWorker(selfUrl: URL, errHandlerCallback?: Function)`
 
  - Return a new `HCAWorker` instance (referred as `hcaWorkerInstance` below), which is generally used in **main thread** to **controls** a `Worker` running `hca.js`, so that computational jobs can be done in background without blocking the foreground main thread.
 
@@ -196,7 +197,7 @@ async function decryptAndDecode(hca) {
 
  - Similar to the [HCAInfo.fixHeaderChecksum](#hcainfofixheaderchecksumhca-uint8array-uint8array)/[HCA.fixChecksum](#hcafixchecksumhca-uint8array-uint8array) raw APIs described above.
 
-### `async hcaWorkerInstance.addCipherHeader(hca: Uint8Array, cipherType: number | undefined = undefined): Uint8Array`
+### `async hcaWorkerInstance.addCipherHeader(hca: Uint8Array, cipherType?: number): Uint8Array`
 ### `async hcaWorkerInstance.addHeader(hca: Uint8Array, sig: string, newData: Uint8Array): Uint8Array`
 
  - Similar to the [HCAInfo.addCipherHeader](#hcainfoaddcipherheaderhca-uint8array-ciphertype-number--undefined--undefined-uint8array)/[HCAInfo.addHeader](#hcainfoaddheaderhca-uint8array-sig-string-newdata-uint8array-uint8array) raw APIs described above.
