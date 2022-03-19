@@ -196,7 +196,7 @@ class HCAInfo {
             let sectionDataLen = ftell - lastFtell - 4;
             let newData = modList[sign];
             if (newData != null) {
-                if (newData.byteLength > sectionDataLen) throw new Error("newData.byteLength > sectionDataLen");
+                if (newData.byteLength > sectionDataLen) throw new Error();
                 hca.set(newData, lastFtell + 4);
                 hasModDone = true;
             }
@@ -294,11 +294,11 @@ class HCAInfo {
     }
     static addHeader(hca: Uint8Array, sig: string, newData: Uint8Array): Uint8Array {
         // sig must consist of 1-4 ASCII characters
-        if (sig.length < 1 || sig.length > 4) throw new Error("sig.length < 1 || sig.length > 4");
+        if (sig.length < 1 || sig.length > 4) throw new Error();
         let newSig = new Uint8Array(4);
         for (let i = 0; i < 4; i++) {
             let c = sig.charCodeAt(i);
-            if (c >= 0x80) throw new Error("sig.charCodeAt(i) >= 0x80");
+            if (c >= 0x80) throw new Error();
             newSig[i] = c;
         }
         // parse header & check validty
@@ -398,27 +398,27 @@ class HCAUtilFunc
     }
     static GetHighNibble(value: number): number
     {
-        if (value > 0xff) throw new Error("value > 0xff");
-        if (value < -0x80) throw new Error("value < -0x80");
+        if (value > 0xff) throw new Error();
+        if (value < -0x80) throw new Error();
         return (value >>> 4) & 0xF;
     }
     static GetLowNibble(value: number): number
     {
-        if (value > 0xff) throw new Error("value > 0xff");
-        if (value < -0x80) throw new Error("value < -0x80");
+        if (value > 0xff) throw new Error();
+        if (value < -0x80) throw new Error();
         return value & 0xF;
     }
     private static readonly SignedNibbles = [0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1];
     static GetHighNibbleSigned(value: number)
     {
-        if (value > 0xff) throw new Error("value > 0xff");
-        if (value < -0x80) throw new Error("value < -0x80");
+        if (value > 0xff) throw new Error();
+        if (value < -0x80) throw new Error();
         return this.SignedNibbles[(value >>> 4) & 0xF];
     }
     static GetLowNibbleSigned(value: number)
     {
-        if (value > 0xff) throw new Error("value > 0xff");
-        if (value < -0x80) throw new Error("value < -0x80");
+        if (value > 0xff) throw new Error();
+        if (value < -0x80) throw new Error();
         return this.SignedNibbles[value & 0xF];
     }
     static CombineNibbles(high: number, low: number)
@@ -437,8 +437,8 @@ class HCAUtilFunc
     }
     static SignedBitReverse32(value: number): number
     {
-        if (value > 0xffffffff) throw new Error("value > 0xffffffff");
-        if (value < -0x80000000) throw new Error("value < -0x80000000");
+        if (value > 0xffffffff) throw new Error();
+        if (value < -0x80000000) throw new Error();
         value = ((value & 0xaaaaaaaa) >>> 1) | ((value & 0x55555555) << 1);
         value = ((value & 0xcccccccc) >>> 2) | ((value & 0x33333333) << 2);
         value = ((value & 0xf0f0f0f0) >>> 4) | ((value & 0x0f0f0f0f) << 4);
@@ -457,8 +457,8 @@ class HCAUtilFunc
     }
     static BitReverse8(value: number): number
     {
-        if (value > 0xff) throw new Error("value > 0xff");
-        if (value < -0x80) throw new Error("value < -0x80");
+        if (value > 0xff) throw new Error();
+        if (value < -0x80) throw new Error();
         value >>>= 0;
         value = ((value & 0xaa) >>> 1) | ((value & 0x55) << 1);
         value = ((value & 0xcc) >>> 2) | ((value & 0x33) << 2);
@@ -591,7 +591,7 @@ class HCA {
         if (info.hasHeader["loop"] && loop) {
             // "tail" beyond loop end is dropped
             // copy looping audio clips
-            if (inWavSize.loop == null) throw new Error("inWavSize.loop == null");
+            if (inWavSize.loop == null) throw new Error();
             let preLoopSizeInWav = inWavSize.sample * (info.loopStartAtSample - info.startAtSample);
             let src = dataPart.subarray(preLoopSizeInWav, preLoopSizeInWav + inWavSize.loop.loopPart);
             for (let i = 0, start = preLoopSizeInWav + inWavSize.loop.loopPart; i < loop; i++) {
@@ -607,7 +607,7 @@ class HCA {
     static decodeBlock(frame: HCAFrame, block: Uint8Array): void
     {
         let info = frame.Hca;
-        if (block.byteLength != info.blockSize) throw new Error("block.byteLength != info.blockSize");
+        if (block.byteLength != info.blockSize) throw new Error();
         // verify checksum
         HCACrc16.verify(block, info.blockSize - 2);
         // decode
@@ -633,9 +633,7 @@ class HCA {
                 ftell = 0;
             }
         } else {
-            if (ftell == null) {
-                throw new Error("ftell == null");
-            }
+            if (ftell == null) throw new Error();
         }
         // write decoded data into writer
         let p = new DataView(writer.buffer, writer.byteOffset, writer.byteLength);
@@ -713,12 +711,12 @@ class HCAWav
         }
         if (isNaN(loop)) throw new Error("loop is not number");
         loop = Math.floor(loop);
-        if (loop < 0) throw new Error("loop < 0");
+        if (loop < 0) throw new Error();
 
         let inWavSize = info.calcInWavSize(mode);
         let dataSize = inWavSize.sample * info.sampleCount;
         if (loop > 0) {
-            if (inWavSize.loop == null) throw new Error("inWavSize.loop == null");
+            if (inWavSize.loop == null) throw new Error();
             dataSize += inWavSize.loop.loopPart * loop;
         }
 
@@ -757,7 +755,7 @@ class HCAWav
         this.fileBuf.set(smplChunk, writtenLength);
         writtenLength += smplChunk.byteLength;
 
-        if (writtenLength != this.fileBuf.byteLength) throw new Error("writtenLength != this.fileBuf.byteLength");
+        if (writtenLength != this.fileBuf.byteLength) throw new Error();
     }
 }
 class HCAWavWaveRiffHeader
@@ -766,7 +764,7 @@ class HCAWavWaveRiffHeader
     constructor (size: number) {
         if (isNaN(size)) throw new Error("size must be number");
         size = Math.floor(size);
-        if (size <= 0) throw new Error("size <= 0");
+        if (size <= 0) throw new Error();
         this.size = 4 + size; // "WAVE" + remaining part
     }
     get(): Uint8Array {
@@ -1864,7 +1862,7 @@ class HCATables
     }
     private static adaptEndianness6432(a: Uint32Array): Uint32Array
     {
-        if (a.byteLength % 8 != 0) throw new Error("a.byteLength % 8 != 0");
+        if (a.byteLength % 8 != 0) throw new Error();
         if (!this.isLittleEndian()) {
             for (let i = 0; i < a.length; i += 2) {
                 let temp = a[i];
@@ -2221,8 +2219,8 @@ class HCACrc16 {
         0x0220,0x8225,0x822F,0x022A,0x823B,0x023E,0x0234,0x8231,0x8213,0x0216,0x021C,0x8219,0x0208,0x820D,0x8207,0x0202
     ]);
     static calc(data: Uint8Array, size: number): number {
-        if (size > data.byteLength) throw new Error("size > data.byteLength");
-        if (size < 0) throw new Error("size < 0");
+        if (size > data.byteLength) throw new Error();
+        if (size < 0) throw new Error();
         let sum = 0;
         for (let i = 0; i < size; i++)
             sum = ((sum << 8) ^ this._v[(sum >> 8) ^ data[i]]) & 0x0000ffff;
