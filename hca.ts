@@ -481,13 +481,13 @@ class HCA {
     constructor () {
     }
 
-    static decrypt(hca: Uint8Array, key1: any = undefined, key2: any = undefined): Uint8Array {
+    static decrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array {
         return this.decryptOrEncrypt(hca, false, key1, key2);
     }
-    static encrypt(hca: Uint8Array, key1: any = undefined, key2: any = undefined): Uint8Array {
+    static encrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array {
         return this.decryptOrEncrypt(hca, true, key1, key2);
     }
-    static decryptOrEncrypt(hca: Uint8Array, encrypt: boolean, key1: any = undefined, key2: any = undefined): Uint8Array {
+    static decryptOrEncrypt(hca: Uint8Array, encrypt: boolean, key1?: any, key2?: any): Uint8Array {
         // in-place decryption/encryption
         // parse header
         let info = new HCAInfo(hca); // throws "Not a HCA file" if mismatch
@@ -2405,7 +2405,7 @@ class HCACipher {
                 throw new Error("can only accept number/hex string/Uint8Array[4]");
         }
     }
-    constructor (key1: any = undefined, key2: any = undefined) {
+    constructor (key1?: any, key2?: any) {
         this.dv1 = new DataView(this.key1buf);
         this.dv2 = new DataView(this.key2buf);
         if (key1 == null) throw new Error("no keys given. use \"defaultkey\" if you want to use the default key");
@@ -2597,10 +2597,10 @@ class HCAWorker {
     async fixChecksum(hca: Uint8Array): Promise<Uint8Array> {
         return await this.sendCmd("fixChecksum", [hca]);
     }
-    async decrypt(hca: Uint8Array, key1: any = undefined, key2: any = undefined): Promise<Uint8Array> {
+    async decrypt(hca: Uint8Array, key1?: any, key2?: any): Promise<Uint8Array> {
         return await this.sendCmd("decrypt", [hca, key1, key2]);
     }
-    async encrypt(hca: Uint8Array, key1: any = undefined, key2: any = undefined): Promise<Uint8Array> {
+    async encrypt(hca: Uint8Array, key1?: any, key2?: any): Promise<Uint8Array> {
         return await this.sendCmd("encrypt", [hca, key1, key2]);
     }
     async addHeader(hca: Uint8Array, sig: string, newData: Uint8Array): Promise<Uint8Array> {

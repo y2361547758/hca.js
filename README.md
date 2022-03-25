@@ -42,8 +42,8 @@ let decryptedHca = HCA.decrypt(hca, "defaultkey");
 let wav = HCA.decode(decryptedHca);
 ```
 
-### `HCA.decrypt(hca: Uint8Array, key1: any = undefined, key2: any = undefined): Uint8Array`
-### `HCA.encrypt(hca: Uint8Array, key1: any = undefined, key2: any = undefined): Uint8Array`
+### `HCA.decrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array`
+### `HCA.encrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array`
 
 Decrypt/encrypt & return the whole HCA file **in-place** with specified keys - in other words, if you don't want the input HCA    to be overwritten, you must pass in something like `hca.slice(0)`, which makes a new copy in a newly allocated buffer.
 
@@ -202,8 +202,8 @@ async function decryptAndDecode(hca) {
 
  - Similar to the [HCAInfo.addCipherHeader](#hcainfoaddcipherheaderhca-uint8array-ciphertype-number--undefined--undefined-uint8array)/[HCAInfo.addHeader](#hcainfoaddheaderhca-uint8array-sig-string-newdata-uint8array-uint8array) raw APIs described above.
 
-### `async hcaWorkerInstance.decrypt(hca: Uint8Array, key1: any = undefined, key2: any = undefined): Uint8Array`
-### `async hcaWorkerInstance.encrypt(hca: Uint8Array, key1: any = undefined, key2: any = undefined): Uint8Array`
+### `async hcaWorkerInstance.decrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array`
+### `async hcaWorkerInstance.encrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array`
 ### `async hcaWorkerInstance.decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0): Uint8Array`
 
  - Similar to the [HCA.decrypt](#hcadecrypthca-uint8array-key1-any--undefined-key2-any--undefined-uint8array)/[HCA.encrypt](#hcaencrypthca-uint8array-key1-any--undefined-key2-any--undefined-uint8array)/[HCA.decode](#hcadecodehca-uint8array-mode--32-loop--0-volume--10-uint8array) raw APIs described above.
