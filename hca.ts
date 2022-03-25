@@ -897,7 +897,7 @@ class HCABitReader {
     dv: DataView;
     LengthBits: number;
     Position: number;
-    GetRemaining(): number{
+    get Remaining(): number {
         return this.LengthBits - this.Position;
     }
 
@@ -937,18 +937,18 @@ class HCABitReader {
     {
         HCAUtilFunc.DebugAssert(bitCount >= 0 && bitCount <= 32);
 
-        if (bitCount > this.GetRemaining())
+        if (bitCount > this.Remaining)
         {
             if (this.Position >= this.LengthBits) return 0;
 
-            let extraBits: number = bitCount - this.GetRemaining();
-            return this.PeekIntFallback(this.GetRemaining()) << extraBits;
+            let extraBits: number = bitCount - this.Remaining;
+            return this.PeekIntFallback(this.Remaining) << extraBits;
         }
 
         let byteIndex: number = this.Position / 8;
         let bitIndex: number = this.Position % 8;
 
-        if (bitCount <= 9 && this.GetRemaining() >= 16)
+        if (bitCount <= 9 && this.Remaining >= 16)
         {
             let value: number = this.dv.getUint16(byteIndex);
             value &= 0xFFFF >> bitIndex;
@@ -956,7 +956,7 @@ class HCABitReader {
             return value;
         }
 
-        if (bitCount <= 17 && this.GetRemaining() >= 24)
+        if (bitCount <= 17 && this.Remaining >= 24)
         {
             let value: number = this.dv.getUint16(byteIndex) << 8 | this.dv.getUint8(byteIndex + 2);
             value &= 0xFFFFFF >> bitIndex;
@@ -964,7 +964,7 @@ class HCABitReader {
             return value;
         }
 
-        if (bitCount <= 25 && this.GetRemaining() >= 32)
+        if (bitCount <= 25 && this.Remaining >= 32)
         {
             let value: number = this.dv.getUint32(byteIndex);
             value &= 0xFFFFFFFF >>> bitIndex;
@@ -1021,7 +1021,7 @@ class HCABitWriter
     dv: DataView;
     LengthBits: number;
     Position = 0;
-    GetRemaining() {return this.LengthBits - this.Position;}
+    get Remaining(): number {return this.LengthBits - this.Position;}
 
     constructor(buffer: Uint8Array)
     {
@@ -1041,7 +1041,7 @@ class HCABitWriter
     {
         HCAUtilFunc.DebugAssert(bitCount >= 0 && bitCount <= 32);
 
-        if (bitCount > this.GetRemaining())
+        if (bitCount > this.Remaining)
         {
             throw new Error("Not enough bits left in output buffer");
         }
@@ -1049,14 +1049,14 @@ class HCABitWriter
         let byteIndex = this.Position / 8;
         let bitIndex = this.Position % 8;
 
-        if (bitCount <= 9 && this.GetRemaining() >= 16)
+        if (bitCount <= 9 && this.Remaining >= 16)
         {
             let outValue = ((value << (16 - bitCount)) & 0xFFFF) >> bitIndex;
             outValue |= this.dv.getUint16(byteIndex);
             this.dv.setUint16(byteIndex, outValue);
         }
 
-        else if (bitCount <= 17 && this.GetRemaining() >= 24)
+        else if (bitCount <= 17 && this.Remaining >= 24)
         {
             let outValue = ((value << (24 - bitCount)) & 0xFFFFFF) >> bitIndex;
             outValue |= this.dv.getUint16(byteIndex) << 8 | this.dv.getUint8(byteIndex + 2);
@@ -1064,7 +1064,7 @@ class HCABitWriter
             this.dv.setUint8(byteIndex + 2, outValue & 0xFF);
         }
 
-        else if (bitCount <= 25 && this.GetRemaining() >= 32)
+        else if (bitCount <= 25 && this.Remaining >= 32)
         {
             let outValue = (((value << (32 - bitCount)) & 0xFFFFFFFF) >>> bitIndex);
             outValue |= this.dv.getUint32(byteIndex);
@@ -1538,9 +1538,9 @@ class HCAPacking
     {
         // 128 leftover bits after unpacking should be high enough to get rid of false negatives,
         // and low enough that false positives will be uncommon.
-        return reader.GetRemaining() >= 16 && reader.GetRemaining() <= 128
+        return reader.Remaining >= 16 && reader.Remaining <= 128
                || this.FrameEmpty(frame)
-               || frame.AcceptableNoiseLevel == 0 && reader.GetRemaining() >= 16;
+               || frame.AcceptableNoiseLevel == 0 && reader.Remaining >= 16;
     }
 
     private static FrameEmpty(frame: HCAFrame): boolean
