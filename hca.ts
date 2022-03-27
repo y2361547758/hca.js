@@ -13,7 +13,7 @@ class HCAInfo {
     blockSize = 0;
     hasHeader: Record<string, boolean> = {};
     headerOffset: Record<string, [number, number]> = {}; // [start (inclusive), end (exclusive)]
-    bps = 0;
+    kbps = 0;
     compDec = {
         MinResolution: 0,
         MaxResolution: 0,
@@ -126,7 +126,7 @@ class HCAInfo {
                     break;
                 case "comp":
                     this.blockSize = p.getUint16(ftell + 4);
-                    this.bps = this.format.samplingRate * this.blockSize / 128000.0;
+                    this.kbps = this.format.samplingRate * this.blockSize / 128000.0;
                     this.compDec.MinResolution = p.getUint8(ftell + 6);
                     this.compDec.MaxResolution = p.getUint8(ftell + 7);
                     this.compDec.TrackCount = p.getUint8(ftell + 8);
@@ -141,7 +141,7 @@ class HCAInfo {
                     break;
                 case "dec":
                     this.blockSize = p.getUint16(ftell + 4);
-                    this.bps = this.format.samplingRate * this.blockSize / 128000.0;
+                    this.kbps = this.format.samplingRate * this.blockSize / 128000.0;
                     this.compDec.MinResolution = p.getUint8(ftell + 6);
                     this.compDec.MaxResolution = p.getUint8(ftell + 7);
                     this.compDec.TotalBandCount = p.getUint8(ftell + 8); + 1;

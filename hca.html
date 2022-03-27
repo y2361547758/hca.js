@@ -152,7 +152,7 @@
                         ["Dropped smpl. (tail)", info.format.droppedFooter],
                     ]],
                     ["Block size", !info.hasHeader["comp"] && !info.hasHeader["dec"] ? null : info.blockSize],
-                    ["Bitrate", !info.hasHeader["comp"] && !info.hasHeader["dec"] ? null : info.bps],
+                    ["Bitrate (kbps)", !info.hasHeader["comp"] && !info.hasHeader["dec"] ? null : info.kbps],
                     ["VBR", info.hasHeader["vbr"] ? "yes" : "no"],
                     ["ATH", !info.hasHeader["ath"] ? null : toHex(info.ath)],
                     ["Loop", !info.hasHeader["loop"] ? null : [
