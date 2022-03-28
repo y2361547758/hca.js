@@ -213,7 +213,7 @@
             let defVal = decodingParam[paramName].defVal;
             let attr = {};
             ["min", "max", "step"].forEach((attrName) => attr[attrName] = el.getAttribute(attrName));
-            function clampVal(val) {
+            let clampVal = function (val) {
                 if (val == null || val === "")
                     return defVal;
                 val = parseInt(val);
