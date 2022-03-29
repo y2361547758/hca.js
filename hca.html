@@ -446,10 +446,7 @@
                     })
                 ].data;
                 try {
-                    worker.tick();
-                    let infoPromise = worker.info(hca);
-                    worker.tock("get HCA info");
-                    let info = await infoPromise;
+                    let info = new HCAInfo(hca);
                     self.textContent = "get HCA info (successful)";
                     // update table content
                     hcaInfoTable.body.data = info;

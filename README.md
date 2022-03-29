@@ -188,10 +188,6 @@ async function decryptAndDecode(hca) {
 
  - `errHandlerCallback` is optional, which will be called if the HCA `Worker` **is irrecoverably crashing** on error.
 
-### `async hcaWorkerInstance.info(hca: Uint8Array): HCAInfo`
-
- - Similar to the [new HCAInfo](#new-hcainfohca-uint8array-changemask-boolean--false-encrypt-boolean--false) raw API described above.
-
 ### `async hcaWorkerInstance.fixHeaderChecksum(hca: Uint8Array): Uint8Array`
 ### `async hcaWorkerInstance.fixChecksum(hca: Uint8Array): Uint8Array`
 
