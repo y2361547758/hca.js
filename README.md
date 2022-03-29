@@ -240,6 +240,20 @@ async function decryptAndDecode(hca) {
 
  - **Once shut down, the `hcaWorkerInstance` will throw `Error` when its methods are still called.** You may set `hcaWorkerInstance = null` after shutting it down.
 
+### `async hcaWorkerInstance.configTransfer(transferArgs: boolean, replyArgs: boolean): Promise<void>`
+
+ - Enable or disable using [transferable objects](https://developer.mozilla.org/en-US/docs/Glossary/Transferable_objects) when communicating between foreground main thread and background workers. Transfering is generally much more fast if data size is large because of zero-copy.
+
+ - **Once `transferArgs` is set to `true`, arguments (like a HCA file in the form of `Uint8Array` TypedArray) passed (from the foreground main thread) to hcaWorkerInstance will no longer be accessible (in the foreground main thread)!**
+
+ - `replyArgs` controls whether the callee/receiver (usually, but not always, the background worker) should send back the arguments originally passed in - turning this off is supposed to save a little time/overhead. Note that replying arguments always uses transfering.
+
+ - Return nothing.
+
+### `async getTransferConfig(): Promise<{transferArgs: boolean, replyArgs: boolean}>`
+
+ - Return the `transferArgs`, `replyArgs` config parameters described above.
+
 # The following APIs have been removed:
 -  ~`new HCA(key1, key2)`~
 ~Init HCA decoder with key~
