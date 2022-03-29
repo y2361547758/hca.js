@@ -2443,10 +2443,8 @@ if (typeof document === "undefined") {
             switch (msg.data.cmd) {
                 case "nop":
                     return;
-                case "info":
-                    return new HCAInfo(msg.data.args[0]);
                 case "fixHeaderChecksum":
-                    return HCAInfo.fixHeaderChecksum.apply(HCA, msg.data.args);
+                    return HCAInfo.fixHeaderChecksum.apply(HCAInfo, msg.data.args);
                 case "fixChecksum":
                     return HCA.fixChecksum.apply(HCA, msg.data.args);
                 case "decrypt":
@@ -2589,9 +2587,6 @@ class HCAWorker {
         this.hcaWorker.onmessageerror = (msg) => this.errHandler(this, msg);
     }
     // commands
-    async info(hca: Uint8Array): Promise<HCAInfo> {
-        return await this.sendCmd("info", [hca]);
-    }
     async fixHeaderChecksum(hca: Uint8Array): Promise<Uint8Array> {
         return await this.sendCmd("fixHeaderChecksum", [hca]);
     }
