@@ -2436,25 +2436,139 @@ class HCACipher {
 }
 
 // Web Workers support
+// convert non-transferable typed array to transferable array buffer
+class HCATransTypedArray {
+    readonly type: string;
+    readonly buffer: ArrayBuffer;
+    readonly byteOffset: number;
+    readonly length: number;
+    static convert(arg: any, transferList: ArrayBuffer[]): any {
+        if (this.getType(arg) != null) return new HCATransTypedArray(arg, transferList);
+        else return arg;
+    }
+    static restore(arg: any): any {
+        const type = this.getType(arg);
+        if (type != null && type.converted) return (arg as HCATransTypedArray).array;
+        else return arg;
+    }
+    private static getType(arg: any): {type: string, converted: boolean} | undefined {
+        if (arg == null || typeof arg !== "object") return undefined;
+        else if (arg instanceof Int8Array)    return {converted: false, type: "Int8"};
+        else if (arg instanceof Int16Array)   return {converted: false, type: "Int16"};
+        else if (arg instanceof Int32Array)   return {converted: false, type: "Int32"};
+        else if (arg instanceof Uint8Array)   return {converted: false, type: "Uint8"};
+        else if (arg instanceof Uint16Array)  return {converted: false, type: "Uint16"};
+        else if (arg instanceof Uint32Array)  return {converted: false, type: "Uint32"};
+        else if (arg instanceof Float32Array) return {converted: false, type: "Float32"};
+        else if (arg instanceof Float64Array) return {converted: false, type: "Float64"};
+        else if (arg.buffer instanceof ArrayBuffer && typeof arg.type === "string") return {converted: true, type: arg.type};
+        else return undefined;
+    }
+    constructor (ta: Int8Array|Int16Array|Int32Array|Uint8Array|Uint16Array|Uint32Array|Float32Array|Float64Array,
+        transferList: ArrayBuffer[])
+    {
+        const type = HCATransTypedArray.getType(ta);
+        if (type != null) this.type = type.type;
+        else throw new Error("unexpected type");
+        this.buffer = ta.buffer;
+        this.byteOffset = ta.byteOffset;
+        this.length = ta.length;
+        if (!transferList.find((val: ArrayBuffer) => val === this.buffer)) transferList.push(this.buffer);
+    }
+    get array(): Int8Array|Int16Array|Int32Array|Uint8Array|Uint16Array|Uint32Array|Float32Array|Float64Array {
+        switch (this.type) {
+            case "Int8":    return new Int8Array(this.buffer, this.byteOffset, this.length);
+            case "Int16":   return new Int16Array(this.buffer, this.byteOffset, this.length);
+            case "Int32":   return new Int32Array(this.buffer, this.byteOffset, this.length);
+            case "Uint8":   return new Uint8Array(this.buffer, this.byteOffset, this.length);
+            case "Uint16":  return new Uint16Array(this.buffer, this.byteOffset, this.length);
+            case "Uint32":  return new Uint32Array(this.buffer, this.byteOffset, this.length);
+            case "Float32": return new Float32Array(this.buffer, this.byteOffset, this.length);
+            case "Float64": return new Float64Array(this.buffer, this.byteOffset, this.length);
+        }
+        throw new Error("unexpected type");
+    }
+}
+// wrapped structure for transferring command/result from/to workers
+class HCATask {
+    readonly taskID: number;
+    readonly cmd: string;
+    get args(): any {
+        return this._args?.map((arg) => HCATransTypedArray.restore(arg));
+    }
+    get hasResult(): boolean {
+        return this._hasResult;
+    }
+    get result(): any {
+        if (!this._hasResult) throw new Error("no result");
+        return HCATransTypedArray.restore(this._result);
+    }
+    set result(result: any) {
+        if (this.hasErr) throw new Error("already has error, cannot set result");
+        if (this._hasResult) throw new Error("cannot set result again");
+        this._result = HCATransTypedArray.convert(result, this.transferList);
+        this._hasResult = true;
+        if (!this._replyArgs) delete this._args;
+    }
+    get hasErr(): boolean {
+        return this._errMsg != null;
+    }
+    get errMsg(): string | undefined {
+        return this._errMsg;
+    }
+    set errMsg(msg: string | undefined) {
+        // changing errMsg is allowed, but clearing errMsg is disallowed
+        if (typeof msg !== "string") throw new Error("error message must be a string");
+        delete this._args;
+        if (this._hasResult) {
+            // clear result on error
+            delete this._result;
+            this._hasResult = false;
+            this.transferList = [];
+            this.args.forEach((arg: any) => HCATransTypedArray.convert(arg, this.transferList));
+        }
+        this._errMsg = msg;
+    }
+    transferList: ArrayBuffer[] = [];
+
+    private _args?: any[];
+    private _hasResult: boolean = false;
+    private _result?: any;
+    private _errMsg?: string;
+    private readonly _replyArgs: boolean;
+    constructor (taskID: number, cmd: string, args: any[] | undefined, replyArgs: boolean) {
+        this.taskID = taskID;
+        this.cmd = cmd;
+        this._args = args?.map((arg) => HCATransTypedArray.convert(arg, this.transferList));
+        this._replyArgs = replyArgs;
+    }
+    static recreate(task: HCATask): HCATask {
+        const recreated = new HCATask(task.taskID, task.cmd, task._args, task._replyArgs);
+        if (task._errMsg != null) recreated.errMsg = task._errMsg;
+        else if (task._hasResult) recreated.result = task._result;
+        return recreated;
+    }
+}
 if (typeof document === "undefined") {
     // running in worker
-    onmessage = function (msg : MessageEvent) {
-        function handleMsg(msg : MessageEvent) {
-            switch (msg.data.cmd) {
+    onmessage = function (msg: MessageEvent) {
+        const task = HCATask.recreate(msg.data);
+        function handleMsg() {
+            switch (task.cmd) {
                 case "nop":
                     return;
                 case "fixHeaderChecksum":
-                    return HCAInfo.fixHeaderChecksum.apply(HCAInfo, msg.data.args);
+                    return HCAInfo.fixHeaderChecksum.apply(HCAInfo, task.args);
                 case "fixChecksum":
-                    return HCA.fixChecksum.apply(HCA, msg.data.args);
+                    return HCA.fixChecksum.apply(HCA, task.args);
                 case "decrypt":
-                    return HCA.decrypt.apply(HCA, msg.data.args);
+                    return HCA.decrypt.apply(HCA, task.args);
                 case "encrypt":
-                    return HCA.encrypt.apply(HCA, msg.data.args);
+                    return HCA.encrypt.apply(HCA, task.args);
                 case "addCipherHeader":
-                    return HCAInfo.addCipherHeader.apply(HCAInfo, msg.data.args);
+                    return HCAInfo.addCipherHeader.apply(HCAInfo, task.args);
                 case "decode":
-                    return HCA.decode.apply(HCA, msg.data.args);
+                    return HCA.decode.apply(HCA, task.args);
                 default:
                     throw new Error("unknown cmd");
             }
@@ -2465,31 +2579,34 @@ if (typeof document === "undefined") {
         // Chrome doesn't seem to have this problem,
         // however, in order to keep compatible with Firefox,
         // we still have to avoid posting an Error object
-        let reply: Record<string, any> = {taskID: msg.data.taskID};
         try {
-            reply.result = handleMsg(msg);
+            task.result = handleMsg();
         } catch (e) {
             console.error(e);
-            reply.hasError = true;
-            reply.errMsg = "error during Worker executing cmd";
-            if (typeof e === "string" || e instanceof Error) reply.errMsg += "\n" + e.toString();
+            task.errMsg = "error during Worker executing cmd";
+            if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
         }
         try {
-            this.postMessage(reply);
+            (this as any).postMessage(task, task.transferList);
         } catch (e) {
             console.error(e);
-            reply.hasError = true;
-            reply.errMsg = (reply.errMsg == null ? "" : reply.errMsg + "\n\n") + "postMessage from Worker failed";
-            if (typeof e === "string" || e instanceof Error) reply.errMsg += "\n" + e.toString();
-            delete reply.result;
+            task.errMsg = (task.errMsg == null ? "" : task.errMsg + "\n\n") + "postMessage from Worker failed";
+            if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
+            // result should now be cleared because errMsg is set
         }
     }
 }
 
 // create & control worker
 class HCAWorker {
+    // comparing to structured copy (by default),
+    // transferring is generally much faster if data size is big (because of zero-copy),
+    // however it obviously has a drawback that transferred arguments are no longer accessible in the sender thread
+    private transferArgs = false;
+    private replyArgs = false;
+
     private selfUrl: URL;
-    private cmdQueue: Array<{taskID: number, cmd: string, args: Array<any>}>;
+    private cmdQueue: Array<HCATask>;
     private resultCallback: Record<number, {onResult: Function, onErr: Function}>;
     private lastTaskID = 0;
     private hcaWorker: Worker;
@@ -2498,16 +2615,20 @@ class HCAWorker {
     private hasError = false;
     private isShutdown = false;
     private lastTick = 0;
+    private postTask(self: HCAWorker, task: HCATask): void {
+        if (this.transferArgs) self.hcaWorker.postMessage(task, task.transferList);
+        else self.hcaWorker.postMessage(task);
+    }
     private execCmdQueueIfIdle(): void {
         if (this.hasError) throw new Error("there was once an error, which had shut down background HCAWorket thread");
         if (this.isShutdown) throw new Error("the Worker instance has been shut down");
         if (this.idle) {
             this.idle = false;
-            if (this.cmdQueue.length > 0) this.hcaWorker.postMessage(this.cmdQueue[0]);
+            if (this.cmdQueue.length > 0) this.postTask(this, this.cmdQueue[0]);
         }
     }
     private resultHandler(self: HCAWorker, msg: MessageEvent): void {
-        let result = msg.data;
+        let result = HCATask.recreate(msg.data);
         let taskID = result.taskID;
         for (let i=0; i<self.cmdQueue.length; i++) {
             if (self.cmdQueue[i].taskID == taskID) {
@@ -2516,9 +2637,9 @@ class HCAWorker {
                     nextTask = self.cmdQueue[i+1];
                 }
                 self.cmdQueue.splice(i, 1);
-                let callback = self.resultCallback[taskID][result.hasError ? "onErr" : "onResult"];
+                let callback = self.resultCallback[taskID][result.hasErr ? "onErr" : "onResult"];
                 try {
-                    callback(result[result.hasError ? "errMsg" : "result"]);
+                    callback(result.hasErr ? result.errMsg : result.result);
                 } catch (e) {
                     let errMsg = "";
                     if (typeof e === "string" || e instanceof Error) errMsg = e.toString();
@@ -2529,7 +2650,7 @@ class HCAWorker {
                 if (nextTask == undefined) {
                     self.idle = true;
                 } else {
-                    self.hcaWorker.postMessage(nextTask);
+                    self.postTask(self, nextTask);
                 }
                 return;
             }
@@ -2554,7 +2675,7 @@ class HCAWorker {
         for (let i=0; i<cmdlist.length; i++) {
             let taskID = ++this.lastTaskID;
             this.resultCallback[taskID] = {onResult: cmdlist[i].onResult, onErr: cmdlist[i].onErr};
-            this.cmdQueue.push({taskID: taskID, cmd: cmdlist[i].cmd, args: cmdlist[i].args});
+            this.cmdQueue.push(new HCATask(taskID, cmdlist[i].cmd, cmdlist[i].args, this.replyArgs));
         }
         this.execCmdQueueIfIdle();
     }
@@ -2575,6 +2696,23 @@ class HCAWorker {
         const duration = new Date().getTime() - this.lastTick;
         console.log(`${text} took ${duration} ms`);
         return duration;
+    }
+    async getTransferConfig(): Promise<{transferArgs: boolean, replyArgs: boolean}> {
+        return await new Promise((resolve, reject) => {
+            this.sendCmdList([{cmd: "nop", args: [], onResult: () => {
+                resolve({transferArgs: this.transferArgs, replyArgs: this.replyArgs});
+            }, onErr: reject}]);
+        });
+    }
+    async configTransfer(transferArgs: boolean, replyArgs: boolean): Promise<void> {
+        if (transferArgs == null || replyArgs == null) throw new Error("invalid argument");
+        return await new Promise((resolve, reject) => {
+            this.sendCmdList([{cmd: "nop", args: [], onResult: () => {
+                this.transferArgs = transferArgs ? true : false;
+                this.replyArgs = replyArgs ? true : false;
+                resolve();
+            }, onErr: reject}]);
+        });
     }
     constructor (selfUrl: URL, errHandlerCallback?: Function) {
         this.selfUrl = selfUrl;
