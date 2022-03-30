@@ -350,7 +350,7 @@
             },
             shutdownbtn: async (self) => {
                 if (worker != null) {
-                    worker.shutdown();
+                    await worker.shutdown();
                     worker = null;
                     console.log("background worker is now shut down");
                 }
