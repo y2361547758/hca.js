@@ -2674,6 +2674,15 @@ class HCATaskQueue {
             if (this.isIdle) this.sendNextTask();
         });
     }
+
+    async shutdown(): Promise<void> {
+        if (this._isAlive) {
+            await this.execCmd("nop", [], () => {
+                this.destroy();
+                this._isAlive = false;
+            });
+        }
+    }
 }
 if (typeof document === "undefined") {
     // running in worker
@@ -2724,14 +2733,16 @@ if (typeof document === "undefined") {
 
 // create & control worker
 class HCAWorker {
+    get isAlive(): boolean {
+        return this.taskQueue.isAlive;
+    }
     private readonly selfUrl: URL;
     private readonly taskQueue: HCATaskQueue;
     private hcaWorker: Worker;
     private lastTick = 0;
     async shutdown(): Promise<void> {
         if (this.taskQueue.isAlive) {
-            await this.taskQueue.execCmd("nop", []);
-            this.hcaWorker.terminate();
+            await this.taskQueue.shutdown();
         }
     }
     async tick(): Promise<void> {
