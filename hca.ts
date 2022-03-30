@@ -2767,6 +2767,12 @@ class HCAWorker {
         this.hcaWorker.onmessageerror = (msg) => this.taskQueue.errHandler(msg);
     }
     // commands
+    async getTransferConfig(): Promise<{transferArgs: boolean, replyArgs: boolean}> {
+        return await this.taskQueue.getTransferConfig();
+    }
+    async configTransfer(transferArgs: boolean, replyArgs: boolean): Promise<void> {
+        return await this.taskQueue.configTransfer(transferArgs, replyArgs);
+    }
     async fixHeaderChecksum(hca: Uint8Array): Promise<Uint8Array> {
         return await this.taskQueue.execCmd("fixHeaderChecksum", [hca]);
     }
