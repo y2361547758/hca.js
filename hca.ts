@@ -2549,6 +2549,132 @@ class HCATask {
         return recreated;
     }
 }
+class HCATaskQueue {
+    private _isAlive = true;
+    private isIdle = true;
+
+    // comparing to structured copy (by default),
+    // transferring is generally much faster if data size is big (because of zero-copy),
+    // however it obviously has a drawback that transferred arguments are no longer accessible in the sender thread
+    private transferArgs = false;
+    // the receiver/callee will always use transferring to send back arguments,
+    // not sending the arguments back is supposed to save a little time/overhead
+    private replyArgs = false;
+
+    private readonly postMessage: Function;
+    private readonly destroy: Function;
+    private queue: HCATask[] = [];
+    private lastTaskID = 0;
+    private callbacks: Record<number, {resolve: Function, reject: Function}> = {};
+
+    private sendNextTask(): void {
+        const task = this.queue.shift();
+        if (task == null) {
+            this.isIdle = true;
+        } else {
+            this.isIdle = false;
+            if (this.transferArgs) this.postMessage(task, task.transferList);
+            else this.postMessage(task);
+        }
+    }
+
+    constructor (postMessage: Function, destroy: Function) {
+        this.postMessage = postMessage;
+        this.destroy = destroy;
+    }
+
+    get isAlive(): boolean {
+        return this._isAlive;
+    }
+
+    // these following two methods/functions are supposed to be callbacks
+    msgHandler(ev: MessageEvent) {
+        // receiving cmd result
+        try {
+            const replied = HCATask.recreate(ev.data);
+
+            // find callback
+            const registered = this.callbacks[replied.taskID];
+            const callback = replied.hasErr
+                ? registered.reject
+                : replied.hasResult
+                    ? registered.resolve
+                    : (() => {throw new Error("replied no result or error");})();
+            delete this.callbacks[replied.taskID];
+
+            // settle promise
+            try {
+                callback(replied.hasErr ? replied.errMsg : replied.result);
+            } catch (e) {
+                console.error(e);
+            }
+
+            // start next task
+            this.sendNextTask();
+        } catch (e) {
+            console.error(e);
+            this.errHandler(e);
+        }
+    }
+    errHandler(data: any) {
+        // irrecoverable error
+        if (data instanceof MessageEvent) data = data.data;
+        if (this._isAlive) {
+            this._isAlive = false;
+            // print error message
+            let errMsg = "";
+            if (typeof data === "string") errMsg += `${data}`;
+            else if (data instanceof Error) errMsg += `${data.toString()}`;
+            console.error(`destroying background worker on error ${errMsg}`);
+            // destroy background worker
+            try {
+                this.destroy();
+            } catch (e) {
+                console.error(`cannot destroy, ${e}`);
+            }
+            // reject all pending promises
+            for (let taskID in this.callbacks) {
+                const reject = this.callbacks[taskID].reject;
+                delete this.callbacks[taskID];
+                try {
+                    reject(errMsg);
+                } catch (e) {
+                    console.error(`error rejecting ${taskID}, ${e}`);
+                }
+            }
+        }
+    }
+
+    async getTransferConfig(): Promise<{transferArgs: boolean, replyArgs: boolean}> {
+        if (!this._isAlive) throw new Error("dead");
+        return await this.execCmd("nop", [], () => ({transferArgs: this.transferArgs, replyArgs: this.replyArgs}));
+    }
+    async configTransfer(transferArgs: boolean, replyArgs: boolean): Promise<void> {
+        if (!this._isAlive) throw new Error("dead");
+        return await this.execCmd("nop", [], () => {
+            this.transferArgs = transferArgs ? true : false;
+            this.replyArgs = replyArgs ? true : false;
+        });
+    }
+
+    async execCmd(cmd: string, args: any[], resolveHook?: Function): Promise<any> {
+        if (!this._isAlive) throw new Error("dead");
+        return await new Promise((resolve, reject) => {
+            // assign new taskID
+            const taskID = ++this.lastTaskID;
+            const task = new HCATask(taskID, cmd, args, this.replyArgs);
+            // register callback
+            if (this.callbacks[taskID] != null) throw new Error(`callback ${taskID} already registered`);
+            const hookedResolve = resolveHook != null
+                ? (result: any) => resolve(resolveHook(result))
+                : (result: any) => resolve(result);
+            this.callbacks[taskID] = {resolve: hookedResolve, reject: reject};
+            // append to command queue
+            this.queue.push(task);
+            if (this.isIdle) this.sendNextTask();
+        });
+    }
+}
 if (typeof document === "undefined") {
     // running in worker
     onmessage = function (msg: MessageEvent) {
@@ -2592,162 +2718,63 @@ if (typeof document === "undefined") {
             console.error(e);
             task.errMsg = (task.errMsg == null ? "" : task.errMsg + "\n\n") + "postMessage from Worker failed";
             if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
-            // result should now be cleared because errMsg is set
         }
     }
 }
 
 // create & control worker
 class HCAWorker {
-    // comparing to structured copy (by default),
-    // transferring is generally much faster if data size is big (because of zero-copy),
-    // however it obviously has a drawback that transferred arguments are no longer accessible in the sender thread
-    private transferArgs = false;
-    private replyArgs = false;
-
     private selfUrl: URL;
-    private cmdQueue: Array<HCATask>;
-    private resultCallback: Record<number, {onResult: Function, onErr: Function}>;
-    private lastTaskID = 0;
+    private taskQueue: HCATaskQueue;
     private hcaWorker: Worker;
-    private errHandlerCallback: Function;
-    private idle = true;
-    private hasError = false;
-    private isShutdown = false;
     private lastTick = 0;
-    private postTask(task: HCATask): void {
-        if (this.transferArgs) this.hcaWorker.postMessage(task, task.transferList);
-        else this.hcaWorker.postMessage(task);
-    }
-    private execCmdQueueIfIdle(): void {
-        if (this.hasError) throw new Error("there was once an error, which had shut down background HCAWorket thread");
-        if (this.isShutdown) throw new Error("the Worker instance has been shut down");
-        if (this.idle) {
-            this.idle = false;
-            if (this.cmdQueue.length > 0) this.postTask(this.cmdQueue[0]);
-        }
-    }
-    private resultHandler(msg: MessageEvent): void {
-        let result = HCATask.recreate(msg.data);
-        let taskID = result.taskID;
-        for (let i=0; i<this.cmdQueue.length; i++) {
-            if (this.cmdQueue[i].taskID == taskID) {
-                let nextTask = undefined;
-                if (i + 1 < this.cmdQueue.length) {
-                    nextTask = this.cmdQueue[i+1];
-                }
-                this.cmdQueue.splice(i, 1);
-                let callback = this.resultCallback[taskID][result.hasErr ? "onErr" : "onResult"];
-                try {
-                    callback(result.hasErr ? result.errMsg : result.result);
-                } catch (e) {
-                    let errMsg = "";
-                    if (typeof e === "string" || e instanceof Error) errMsg = e.toString();
-                    this.errHandler(errMsg); // before delete this.resultCallback[taskID];
-                    return;
-                }
-                delete this.resultCallback[taskID];
-                if (nextTask == undefined) {
-                    this.idle = true;
-                } else {
-                    this.postTask(nextTask);
-                }
-                return;
-            }
-        }
-        throw new Error("taskID not found in cmdQueue");
-    }
-    private errHandler(err: any): void {
-        this.hasError = true;
-        try {
-            this.hcaWorker.terminate();
-        } catch (e) {console.error(e);}
-        try {
-            for (let taskID in this.resultCallback) try {
-                this.resultCallback[taskID].onErr(err);
-            } catch (e) {console.error(e);}
-        } catch (e) {console.error(e);}
-        try {
-            this.errHandlerCallback(err);
-        } catch (e) {console.error(e);}
-    }
-    sendCmdList(cmdlist: Array<{cmd: string, args: Array<any>, onResult: Function, onErr: Function}>): void {
-        for (let i=0; i<cmdlist.length; i++) {
-            let taskID = ++this.lastTaskID;
-            this.resultCallback[taskID] = {onResult: cmdlist[i].onResult, onErr: cmdlist[i].onErr};
-            this.cmdQueue.push(new HCATask(taskID, cmdlist[i].cmd, cmdlist[i].args, this.replyArgs));
-        }
-        this.execCmdQueueIfIdle();
-    }
-    sendCmd(cmd: string, args: Array<any>): Promise<any> {
-        return new Promise((resolve, reject) => this.sendCmdList([{cmd: cmd, args: args, onResult: resolve, onErr: reject}]));
-    }
     async shutdown(): Promise<void> {
-        await this.sendCmd("nop", []);
-        this.hcaWorker.terminate();
-        this.isShutdown = true;
+        if (this.taskQueue.isAlive) {
+            await this.taskQueue.execCmd("nop", []);
+            this.hcaWorker.terminate();
+        }
     }
     async tick(): Promise<void> {
-        await this.sendCmd("nop", []);
+        await this.taskQueue.execCmd("nop", []);
         this.lastTick = new Date().getTime();
     }
     async tock(text = ""): Promise<number> {
-        await this.sendCmd("nop", []);
+        await this.taskQueue.execCmd("nop", []);
         const duration = new Date().getTime() - this.lastTick;
         console.log(`${text} took ${duration} ms`);
         return duration;
     }
-    async getTransferConfig(): Promise<{transferArgs: boolean, replyArgs: boolean}> {
-        return await new Promise((resolve, reject) => {
-            this.sendCmdList([{cmd: "nop", args: [], onResult: () => {
-                resolve({transferArgs: this.transferArgs, replyArgs: this.replyArgs});
-            }, onErr: reject}]);
-        });
-    }
-    async configTransfer(transferArgs: boolean, replyArgs: boolean): Promise<void> {
-        if (transferArgs == null || replyArgs == null) throw new Error("invalid argument");
-        return await new Promise((resolve, reject) => {
-            this.sendCmdList([{cmd: "nop", args: [], onResult: () => {
-                this.transferArgs = transferArgs ? true : false;
-                this.replyArgs = replyArgs ? true : false;
-                resolve();
-            }, onErr: reject}]);
-        });
-    }
-    constructor (selfUrl: URL | string, errHandlerCallback?: Function) {
+    constructor (selfUrl: URL | string) {
         if (selfUrl instanceof URL) this.selfUrl = selfUrl;
         else if (typeof selfUrl === "string") this.selfUrl = new URL(selfUrl, document.baseURI);
         else throw new Error("selfUrl must be either string or URL");
-        if (errHandlerCallback != null && typeof errHandlerCallback !== "function")
-            throw new Error("errHandlerCallback must be either omitted or a function");
-        this.cmdQueue = [];
-        this.resultCallback = {};
         this.hcaWorker = new Worker(this.selfUrl);
-        this.errHandlerCallback = errHandlerCallback != null ? errHandlerCallback : () => {};
-        this.hcaWorker.onmessage = (msg) => this.resultHandler(msg);
-        this.hcaWorker.onerror = (msg) => this.errHandler(msg);
-        this.hcaWorker.onmessageerror = (msg) => this.errHandler(msg);
+        this.taskQueue = new HCATaskQueue((msg: any, trans: Transferable[]) => this.hcaWorker.postMessage(msg, trans),
+            () => this.hcaWorker.terminate);
+        this.hcaWorker.onmessage = (msg) => this.taskQueue.msgHandler(msg);
+        this.hcaWorker.onerror = (msg) => this.taskQueue.errHandler(msg);
+        this.hcaWorker.onmessageerror = (msg) => this.taskQueue.errHandler(msg);
     }
     // commands
     async fixHeaderChecksum(hca: Uint8Array): Promise<Uint8Array> {
-        return await this.sendCmd("fixHeaderChecksum", [hca]);
+        return await this.taskQueue.execCmd("fixHeaderChecksum", [hca]);
     }
     async fixChecksum(hca: Uint8Array): Promise<Uint8Array> {
-        return await this.sendCmd("fixChecksum", [hca]);
+        return await this.taskQueue.execCmd("fixChecksum", [hca]);
     }
     async decrypt(hca: Uint8Array, key1?: any, key2?: any): Promise<Uint8Array> {
-        return await this.sendCmd("decrypt", [hca, key1, key2]);
+        return await this.taskQueue.execCmd("decrypt", [hca, key1, key2]);
     }
     async encrypt(hca: Uint8Array, key1?: any, key2?: any): Promise<Uint8Array> {
-        return await this.sendCmd("encrypt", [hca, key1, key2]);
+        return await this.taskQueue.execCmd("encrypt", [hca, key1, key2]);
     }
     async addHeader(hca: Uint8Array, sig: string, newData: Uint8Array): Promise<Uint8Array> {
-        return await this.sendCmd("addHeader", [hca, sig, newData]);
+        return await this.taskQueue.execCmd("addHeader", [hca, sig, newData]);
     }
     async addCipherHeader(hca: Uint8Array, cipherType?: number): Promise<Uint8Array> {
-        return await this.sendCmd("addCipherHeader", [hca, cipherType]);
+        return await this.taskQueue.execCmd("addCipherHeader", [hca, cipherType]);
     }
     async decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0): Promise<Uint8Array> {
-        return await this.sendCmd("decode", [hca, mode, loop, volume]);
+        return await this.taskQueue.execCmd("decode", [hca, mode, loop, volume]);
     }
 }
