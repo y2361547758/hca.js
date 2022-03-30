@@ -2718,6 +2718,8 @@ class HCAWorker {
         if (selfUrl instanceof URL) this.selfUrl = selfUrl;
         else if (typeof selfUrl === "string") this.selfUrl = new URL(selfUrl, document.baseURI);
         else throw new Error("selfUrl must be either string or URL");
+        if (errHandlerCallback != null && typeof errHandlerCallback !== "function")
+            throw new Error("errHandlerCallback must be either omitted or a function");
         this.cmdQueue = [];
         this.resultCallback = {};
         this.hcaWorker = new Worker(this.selfUrl);
