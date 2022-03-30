@@ -2615,60 +2615,60 @@ class HCAWorker {
     private hasError = false;
     private isShutdown = false;
     private lastTick = 0;
-    private postTask(self: HCAWorker, task: HCATask): void {
-        if (this.transferArgs) self.hcaWorker.postMessage(task, task.transferList);
-        else self.hcaWorker.postMessage(task);
+    private postTask(task: HCATask): void {
+        if (this.transferArgs) this.hcaWorker.postMessage(task, task.transferList);
+        else this.hcaWorker.postMessage(task);
     }
     private execCmdQueueIfIdle(): void {
         if (this.hasError) throw new Error("there was once an error, which had shut down background HCAWorket thread");
         if (this.isShutdown) throw new Error("the Worker instance has been shut down");
         if (this.idle) {
             this.idle = false;
-            if (this.cmdQueue.length > 0) this.postTask(this, this.cmdQueue[0]);
+            if (this.cmdQueue.length > 0) this.postTask(this.cmdQueue[0]);
         }
     }
-    private resultHandler(self: HCAWorker, msg: MessageEvent): void {
+    private resultHandler(msg: MessageEvent): void {
         let result = HCATask.recreate(msg.data);
         let taskID = result.taskID;
-        for (let i=0; i<self.cmdQueue.length; i++) {
-            if (self.cmdQueue[i].taskID == taskID) {
+        for (let i=0; i<this.cmdQueue.length; i++) {
+            if (this.cmdQueue[i].taskID == taskID) {
                 let nextTask = undefined;
-                if (i + 1 < self.cmdQueue.length) {
-                    nextTask = self.cmdQueue[i+1];
+                if (i + 1 < this.cmdQueue.length) {
+                    nextTask = this.cmdQueue[i+1];
                 }
-                self.cmdQueue.splice(i, 1);
-                let callback = self.resultCallback[taskID][result.hasErr ? "onErr" : "onResult"];
+                this.cmdQueue.splice(i, 1);
+                let callback = this.resultCallback[taskID][result.hasErr ? "onErr" : "onResult"];
                 try {
                     callback(result.hasErr ? result.errMsg : result.result);
                 } catch (e) {
                     let errMsg = "";
                     if (typeof e === "string" || e instanceof Error) errMsg = e.toString();
-                    this.errHandler(self, errMsg); // before delete self.resultCallback[taskID];
+                    this.errHandler(errMsg); // before delete this.resultCallback[taskID];
                     return;
                 }
-                delete self.resultCallback[taskID];
+                delete this.resultCallback[taskID];
                 if (nextTask == undefined) {
-                    self.idle = true;
+                    this.idle = true;
                 } else {
-                    self.postTask(self, nextTask);
+                    this.postTask(nextTask);
                 }
                 return;
             }
         }
         throw new Error("taskID not found in cmdQueue");
     }
-    private errHandler(self: HCAWorker, err: any): void {
-        self.hasError = true;
+    private errHandler(err: any): void {
+        this.hasError = true;
         try {
-            self.hcaWorker.terminate();
+            this.hcaWorker.terminate();
         } catch (e) {console.error(e);}
         try {
-            for (let taskID in self.resultCallback) try {
-                self.resultCallback[taskID].onErr(err);
+            for (let taskID in this.resultCallback) try {
+                this.resultCallback[taskID].onErr(err);
             } catch (e) {console.error(e);}
         } catch (e) {console.error(e);}
         try {
-            self.errHandlerCallback(err);
+            this.errHandlerCallback(err);
         } catch (e) {console.error(e);}
     }
     sendCmdList(cmdlist: Array<{cmd: string, args: Array<any>, onResult: Function, onErr: Function}>): void {
@@ -2724,9 +2724,9 @@ class HCAWorker {
         this.resultCallback = {};
         this.hcaWorker = new Worker(this.selfUrl);
         this.errHandlerCallback = errHandlerCallback != null ? errHandlerCallback : () => {};
-        this.hcaWorker.onmessage = (msg) => this.resultHandler(this, msg);
-        this.hcaWorker.onerror = (msg) => this.errHandler(this, msg);
-        this.hcaWorker.onmessageerror = (msg) => this.errHandler(this, msg);
+        this.hcaWorker.onmessage = (msg) => this.resultHandler(msg);
+        this.hcaWorker.onerror = (msg) => this.errHandler(msg);
+        this.hcaWorker.onmessageerror = (msg) => this.errHandler(msg);
     }
     // commands
     async fixHeaderChecksum(hca: Uint8Array): Promise<Uint8Array> {
