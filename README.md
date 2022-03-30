@@ -180,7 +180,7 @@ async function decryptAndDecode(hca) {
 }
 ```
 
-### `new HCAWorker(selfUrl: URL, errHandlerCallback?: Function)`
+### `new HCAWorker(selfUrl: URL | string, errHandlerCallback?: Function)`
 
  - Return a new `HCAWorker` instance (referred as `hcaWorkerInstance` below), which is generally used in **main thread** to **controls** a `Worker` running `hca.js`, so that computational jobs can be done in background without blocking the foreground main thread.
 
