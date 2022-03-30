@@ -2724,8 +2724,8 @@ if (typeof document === "undefined") {
 
 // create & control worker
 class HCAWorker {
-    private selfUrl: URL;
-    private taskQueue: HCATaskQueue;
+    private readonly selfUrl: URL;
+    private readonly taskQueue: HCATaskQueue;
     private hcaWorker: Worker;
     private lastTick = 0;
     async shutdown(): Promise<void> {
