@@ -10,12 +10,12 @@
     <h3>Choose a HCA file</h3>
     Pick a local file: <input type="file" id="localfile" accept=".hca" onchange="buttons.loadfilebtn = this.files.length > 0"><br>
     <button disabled id="loadfilebtn">load picked file</button><br> 
-    Or download from URL: <input type="text" id="urlinput" value="bgm01_anime02_hca.hca"><br>
+    Or download from URL: <input type="text" spellcheck="false" id="urlinput" value="bgm01_anime02_hca.hca"><br>
     <button id="downloadbtn">download</button><br>
     <hr>
     <h3>Set keys for decryption/encryption</h3>
-    key1=<input type="text" id="key1input" value="0x01395C51"><br>
-    key2=<input type="text" id="key2input" value="0x00000000"><br>
+    key1=<input type="text" spellcheck="false" id="key1input" value="0x01395C51"><br>
+    key2=<input type="text" spellcheck="false" id="key2input" value="0x00000000"><br>
     <i>Note: output waveform will be nothing but unpleasant meaningless noise if incorrect keys are given!</i><br>
     <hr>
     <h3>Set decoding mode/loop count/volume</h3>
