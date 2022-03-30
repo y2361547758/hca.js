@@ -2714,11 +2714,13 @@ class HCAWorker {
             }, onErr: reject}]);
         });
     }
-    constructor (selfUrl: URL, errHandlerCallback?: Function) {
-        this.selfUrl = selfUrl;
+    constructor (selfUrl: URL | string, errHandlerCallback?: Function) {
+        if (selfUrl instanceof URL) this.selfUrl = selfUrl;
+        else if (typeof selfUrl === "string") this.selfUrl = new URL(selfUrl, document.baseURI);
+        else throw new Error("selfUrl must be either string or URL");
         this.cmdQueue = [];
         this.resultCallback = {};
-        this.hcaWorker = new Worker(selfUrl);
+        this.hcaWorker = new Worker(this.selfUrl);
         this.errHandlerCallback = errHandlerCallback != null ? errHandlerCallback : () => {};
         this.hcaWorker.onmessage = (msg) => this.resultHandler(this, msg);
         this.hcaWorker.onerror = (msg) => this.errHandler(this, msg);
