@@ -8,17 +8,25 @@
     <button disabled id="shutdownbtn">shutdown background worker</button><br>
     <hr>
     <h3>Choose a HCA file</h3>
-    Pick a local file: <input type="file" id="localfile" accept=".hca" onchange="buttons.loadfilebtn = this.files.length > 0"><br>
-    <button disabled id="loadfilebtn">load picked file</button><br> 
-    Or download from URL: <input type="text" id="urlinput" value="bgm01_anime02_hca.hca"><br>
+    <form id="localfileform">
+        Pick a local file: <input type="file" id="localfile" accept=".hca" onchange="buttons.loadfilebtn = this.files.length > 0"><br>
+    </form>
+    <b><u>Don't forget to</u></b> <button disabled id="loadfilebtn">load picked file</button><br>
+    Or download from URL: <input type="text" spellcheck="false" id="urlinput" value="bgm01_anime02_hca.hca"><br>
     <button id="downloadbtn">download</button><br>
     <hr>
     <h3>Set keys for decryption/encryption</h3>
-    key1=<input type="text" id="key1input" value="0x01395C51"><br>
-    key2=<input type="text" id="key2input" value="0x00000000"><br>
+    key1=<input type="text" spellcheck="false" id="key1input" value="0x01395C51"><br>
+    key2=<input type="text" spellcheck="false" id="key2input" value="0x00000000"><br>
     <i>Note: output waveform will be nothing but unpleasant meaningless noise if incorrect keys are given!</i><br>
     <hr>
-    <h3>Set decoding mode/loop count/volume</h3>
+    <h3>Streaming (<a href="https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet">AudioWorklet API</a>)</h3>
+    Play a HCA file, which has been fully loaded/downloaded above:<br>
+    <button id="awplaywholehcabtn">Play</button><br>
+    Play directly from the URL above, without fully downloading the whole file:<br>
+    <button id="awplayfromurlbtn">Play</button><br>
+    <hr>
+    <h3>Decode the whole file</h3>
     Decoding mode: <input type="number" step="8" min="0" max="32" placeholder="0-99" id="decodingmodeinput" value="16"><br>
     Loop count: <input type="number" step="1" min="0" max="99" placeholder="0-99" id="loopcountinput" value="0"><br>
     Volume: <input type="number" step="1" min="0" max="100" placeholder="0-100" id="volumeinput" value="100"><br>
@@ -28,8 +36,6 @@
     (3) Loop count doesn't count the existing part which is originally supposed to be looped.<br>
     &nbsp;&nbsp;&nbsp;&nbsp;<b>In other words, actual loop count will be: the number set here plus one.</b><br>
     (4) When <b>decoding the whole file</b>, setting loop count to <b>zero</b> means: <b>disabling loop</b>.</b><br>
-    <hr>
-    <h3>Decode the whole file</h3>
     <button disabled id="infobtn">get HCA info</button><br>
     <style>
         table {
@@ -78,12 +84,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-const scaling_table = new Float64Array(64);
-const scale_conversion_table = new Float64Array(128);
-for (let i = 0; i < 64; i++)
-    scaling_table[i] = Math.pow(2, (i - 63) * 53.0 / 128.0 + 3.5);
-for (let i = 2; i < 127; i++)
-    scale_conversion_table[i] = Math.pow(2, (i - 64) * 53.0 / 128.0);
+var _a, _b;
 class HCAInfo {
     constructor(hca, changeMask = false, encrypt = false) {
         this.version = "";
@@ -98,9 +99,23 @@ class HCAInfo {
         this.blockSize = 0;
         this.hasHeader = {};
         this.headerOffset = {}; // [start (inclusive), end (exclusive)]
-        this.bps = 0;
-        this.compParam = new Uint8Array(9);
-        this.ath = 0;
+        this.kbps = 0;
+        this.compDec = {
+            MinResolution: 0,
+            MaxResolution: 0,
+            TrackCount: 0,
+            ChannelConfig: 0,
+            TotalBandCount: 0,
+            BaseBandCount: 0,
+            StereoBandCount: 0,
+            HfrBandCount: 0,
+            BandsPerHfrGroup: 0,
+            Reserved1: 0,
+            Reserved2: 0,
+        };
+        this.dec = {
+            DecStereoType: 0,
+        };
         this.loop = {
             start: 0,
             end: 0,
@@ -109,15 +124,27 @@ class HCAInfo {
             droppedHeader: 0,
             droppedFooter: 0,
         };
+        this.vbr = {
+            MaxBlockSize: 0,
+            NoiseLevel: 0,
+        };
+        this.UseAthCurve = false;
         this.cipher = 0;
         this.rva = 0.0;
         this.comment = "";
         // computed sample count/offsets
+        this.HfrGroupCount = 0;
         this.fullSampleCount = 0;
         this.startAtSample = 0;
-        this.endAtSample = 0;
+        this.fullEndAtSample = 0;
         this.loopStartAtSample = 0;
         this.loopEndAtSample = 0;
+        this.loopSampleCount = 0;
+        this.endAtSample = 0;
+        this.sampleCount = 0;
+        // full file size / data part (excluding header, just blocks/frames) size
+        this.fullSize = 0;
+        this.dataSize = 0;
         // if changeMask == true, (un)mask the header sigs in-place
         this.rawHeader = this.parseHeader(hca, changeMask, encrypt, {});
     }
@@ -187,28 +214,45 @@ class HCAInfo {
                     break;
                 case "comp":
                     this.blockSize = p.getUint16(ftell + 4);
-                    this.bps = this.format.samplingRate * this.blockSize / 128000.0;
-                    this.compParam = hca.slice(ftell + 6, ftell + 6 + 9);
+                    this.kbps = this.format.samplingRate * this.blockSize / 128000.0;
+                    this.compDec.MinResolution = p.getUint8(ftell + 6);
+                    this.compDec.MaxResolution = p.getUint8(ftell + 7);
+                    this.compDec.TrackCount = p.getUint8(ftell + 8);
+                    this.compDec.ChannelConfig = p.getUint8(ftell + 9);
+                    this.compDec.TotalBandCount = p.getUint8(ftell + 10);
+                    this.compDec.BaseBandCount = p.getUint8(ftell + 11);
+                    this.compDec.StereoBandCount = p.getUint8(ftell + 12);
+                    this.compDec.BandsPerHfrGroup = p.getUint8(ftell + 13);
+                    this.compDec.Reserved1 = p.getUint8(ftell + 14);
+                    this.compDec.Reserved2 = p.getUint8(ftell + 15);
                     ftell += 16;
                     break;
                 case "dec":
                     this.blockSize = p.getUint16(ftell + 4);
-                    this.bps = this.format.samplingRate * this.blockSize / 128000.0;
-                    this.compParam[0] = p.getUint8(ftell + 6);
-                    this.compParam[1] = p.getUint8(ftell + 7);
-                    this.compParam[2] = p.getUint8(ftell + 11);
-                    this.compParam[3] = p.getUint8(ftell + 10);
-                    this.compParam[4] = p.getUint8(ftell + 8) + 1;
-                    this.compParam[5] = (p.getUint8(ftell + 12) ? p.getUint8(ftell + 9) : p.getUint8(ftell + 8)) + 1;
-                    this.compParam[6] = this.compParam[4] - this.compParam[5];
-                    this.compParam[7] = 0;
-                    ftell += 13;
+                    this.kbps = this.format.samplingRate * this.blockSize / 128000.0;
+                    this.compDec.MinResolution = p.getUint8(ftell + 6);
+                    this.compDec.MaxResolution = p.getUint8(ftell + 7);
+                    this.compDec.TotalBandCount = p.getUint8(ftell + 8);
+                    +1;
+                    this.compDec.BaseBandCount = p.getUint8(ftell + 9);
+                    +1;
+                    let a = p.getUint8(ftell + 10);
+                    this.compDec.TrackCount = HCAUtilFunc.GetHighNibble(a);
+                    this.compDec.ChannelConfig = HCAUtilFunc.GetLowNibble(a);
+                    this.dec.DecStereoType = p.getUint8(ftell + 11);
+                    if (this.dec.DecStereoType == 0) {
+                        this.compDec.BaseBandCount = this.compDec.TotalBandCount;
+                    }
+                    else {
+                        this.compDec.StereoBandCount = this.compDec.TotalBandCount - this.compDec.BaseBandCount;
+                    }
+                    ftell += 12;
                     break;
                 case "vbr":
                     ftell += 8;
                     break;
                 case "ath":
-                    this.ath = p.getUint16(ftell + 4);
+                    this.UseAthCurve = p.getUint16(ftell + 4) == 1;
                     ftell += 6;
                     break;
                 case "loop":
@@ -226,6 +270,10 @@ class HCAInfo {
                     this.rva = p.getFloat32(ftell + 4);
                     ftell += 8;
                     break;
+                case "vbr":
+                    this.vbr.MaxBlockSize = p.getUint16(ftell + 4);
+                    this.vbr.NoiseLevel = p.getInt16(ftell + 6);
+                    break;
                 case "comm":
                     let len = p.getUint8(ftell + 4);
                     let jisdecoder = new TextDecoder('shift-jis');
@@ -240,23 +288,42 @@ class HCAInfo {
             let newData = modList[sign];
             if (newData != null) {
                 if (newData.byteLength > sectionDataLen)
-                    throw new Error("newData.byteLength > sectionDataLen");
+                    throw new Error();
                 hca.set(newData, lastFtell + 4);
                 hasModDone = true;
             }
         }
+        /*
+        // (ported from) Nyagamon's original code, should be (almost) equivalent to CalculateHfrValues
         this.compParam[2] = this.compParam[2] || 1;
         let _a = this.compParam[4] - this.compParam[5] - this.compParam[6];
         let _b = this.compParam[7];
-        this.compParam[8] = _b > 0 ? _a / _b + (_a % _b ? 1 : 0) : 0;
-        // calculate sample count/offsets
-        this.fullSampleCount = this.format.blockCount * 0x400;
-        this.startAtSample = this.format.droppedHeader;
-        this.endAtSample = this.fullSampleCount - this.format.droppedFooter;
-        if (this.hasHeader["loop"]) {
-            this.loopStartAtSample = this.loop.start * 0x400 + this.loop.droppedHeader;
-            this.loopEndAtSample = (this.loop.end + 1) * 0x400 - this.loop.droppedFooter;
+        this.compDec.Reserved1 = _b > 0 ? _a / _b + (_a % _b ? 1 : 0) : 0;
+        // Translating the above code with meaningful variable names:
+        this.compDec.TrackCount = this.compDec.TrackCount || 1;
+        this.compDec.HfrBandCount = this.compDec.TotalBandCount - this.compDec.BaseBandCount - this.compDec.StereoBandCount;
+        this.HfrGroupCount = this.compDec.BandsPerHfrGroup;
+        this.compDec.Reserved1 = this.HfrGroupCount > 0 ? this.compDec.HfrBandCount / this.HfrGroupCount + (this.compDec.HfrBandCount % this.HfrGroupCount ? 1 : 0) : 0;
+        */
+        // CalculateHfrValues, ported from VGAudio
+        if (this.compDec.BandsPerHfrGroup > 0) {
+            this.compDec.HfrBandCount = this.compDec.TotalBandCount - this.compDec.BaseBandCount - this.compDec.StereoBandCount;
+            this.HfrGroupCount = HCAUtilFunc.DivideByRoundUp(this.compDec.HfrBandCount, this.compDec.BandsPerHfrGroup);
         }
+        // calculate sample count/offsets
+        this.fullSampleCount = this.format.blockCount * HCAFrame.SamplesPerFrame;
+        this.startAtSample = this.format.droppedHeader;
+        this.fullEndAtSample = this.fullSampleCount - this.format.droppedFooter;
+        if (this.hasHeader["loop"]) {
+            this.loopStartAtSample = this.loop.start * HCAFrame.SamplesPerFrame + this.loop.droppedHeader;
+            this.loopEndAtSample = (this.loop.end + 1) * HCAFrame.SamplesPerFrame - this.loop.droppedFooter;
+            this.loopSampleCount = this.loopEndAtSample - this.loopStartAtSample;
+        }
+        this.endAtSample = this.hasHeader["loop"] ? this.loopEndAtSample : this.fullEndAtSample;
+        this.sampleCount = this.endAtSample - this.startAtSample;
+        // calculate file/data size
+        this.dataSize = this.blockSize * this.format.blockCount;
+        this.fullSize = this.dataOffset + this.dataSize;
         if (changeMask || hasModDone) {
             // fix checksum if requested
             HCACrc16.fix(hca, this.dataOffset - 2);
@@ -271,8 +338,8 @@ class HCAInfo {
             this.blockSize > 0,
             0 < this.format.blockCount,
             0 <= this.startAtSample,
-            this.startAtSample < this.endAtSample,
-            this.endAtSample <= this.fullSampleCount,
+            this.startAtSample < this.fullEndAtSample,
+            this.fullEndAtSample <= this.fullSampleCount,
         ];
         results.find((result, index) => {
             if (!result) {
@@ -283,7 +350,7 @@ class HCAInfo {
             const loopChecks = [
                 this.startAtSample <= this.loopStartAtSample,
                 this.loopStartAtSample < this.loopEndAtSample,
-                this.loopEndAtSample <= this.endAtSample,
+                this.loopEndAtSample <= this.fullEndAtSample,
             ];
             loopChecks.find((result, index) => {
                 if (!result) {
@@ -291,6 +358,9 @@ class HCAInfo {
                 }
             });
         }
+    }
+    getRawHeader() {
+        return this.rawHeader.slice(0);
     }
     isHeaderChanged(hca) {
         if (hca.length >= this.rawHeader.length) {
@@ -322,12 +392,12 @@ class HCAInfo {
     static addHeader(hca, sig, newData) {
         // sig must consist of 1-4 ASCII characters
         if (sig.length < 1 || sig.length > 4)
-            throw new Error("sig.length < 1 || sig.length > 4");
+            throw new Error();
         let newSig = new Uint8Array(4);
         for (let i = 0; i < 4; i++) {
             let c = sig.charCodeAt(i);
             if (c >= 0x80)
-                throw new Error("sig.charCodeAt(i) >= 0x80");
+                throw new Error();
             newSig[i] = c;
         }
         // parse header & check validty
@@ -355,7 +425,7 @@ class HCAInfo {
         info = new HCAInfo(newHca);
         return newHca;
     }
-    static addCipherHeader(hca, cipherType = undefined) {
+    static addCipherHeader(hca, cipherType) {
         let newData = new Uint8Array(2);
         if (cipherType != null)
             new DataView(newData.buffer).setUint16(0, cipherType);
@@ -371,17 +441,132 @@ class HCAInfo {
         HCACrc16.fix(hca, dataOffset - 2);
         return hca;
     }
+    calcInWavSize(mode = 32) {
+        switch (mode) {
+            case 0: // float
+            case 8:
+            case 16:
+            case 24:
+            case 32: // integer
+                break;
+            default:
+                mode = 32;
+        }
+        let bitsPerSample = mode == 0 ? 32 : mode;
+        let sampleSizeInWav = this.format.channelCount * bitsPerSample / 8;
+        return this.inWavSize = {
+            bitsPerSample: bitsPerSample,
+            sample: sampleSizeInWav,
+            block: HCAFrame.SamplesPerFrame * sampleSizeInWav,
+            dropped: {
+                header: this.format.droppedHeader * sampleSizeInWav,
+                footer: this.format.droppedFooter * sampleSizeInWav,
+            },
+            loop: this.hasHeader["loop"] ? {
+                loopPart: (this.loopEndAtSample - this.loopStartAtSample) * sampleSizeInWav,
+                dropped: {
+                    header: this.loop.droppedHeader * sampleSizeInWav,
+                    footer: this.loop.droppedFooter * sampleSizeInWav,
+                }
+            } : undefined,
+        };
+    }
 }
+class HCAUtilFunc {
+    static DivideByRoundUp(value, divisor) {
+        return Math.ceil(value / divisor);
+    }
+    static GetHighNibble(value) {
+        if (value > 0xff)
+            throw new Error();
+        if (value < -0x80)
+            throw new Error();
+        return (value >>> 4) & 0xF;
+    }
+    static GetLowNibble(value) {
+        if (value > 0xff)
+            throw new Error();
+        if (value < -0x80)
+            throw new Error();
+        return value & 0xF;
+    }
+    static GetHighNibbleSigned(value) {
+        if (value > 0xff)
+            throw new Error();
+        if (value < -0x80)
+            throw new Error();
+        return this.SignedNibbles[(value >>> 4) & 0xF];
+    }
+    static GetLowNibbleSigned(value) {
+        if (value > 0xff)
+            throw new Error();
+        if (value < -0x80)
+            throw new Error();
+        return this.SignedNibbles[value & 0xF];
+    }
+    static CombineNibbles(high, low) {
+        return ((high << 4) | (low & 0xF)) & 0xFF;
+    }
+    static GetNextMultiple(value, multiple) {
+        if (multiple <= 0)
+            return value;
+        if (value % multiple == 0)
+            return value;
+        return value + multiple - value % multiple;
+    }
+    static SignedBitReverse32(value) {
+        if (value > 0xffffffff)
+            throw new Error();
+        if (value < -0x80000000)
+            throw new Error();
+        value = ((value & 0xaaaaaaaa) >>> 1) | ((value & 0x55555555) << 1);
+        value = ((value & 0xcccccccc) >>> 2) | ((value & 0x33333333) << 2);
+        value = ((value & 0xf0f0f0f0) >>> 4) | ((value & 0x0f0f0f0f) << 4);
+        value = ((value & 0xff00ff00) >>> 8) | ((value & 0x00ff00ff) << 8);
+        return ((value & 0xffff0000) >>> 16) | ((value & 0x0000ffff) << 16);
+    }
+    static UnsignedBitReverse32(value) {
+        return this.SignedBitReverse32(value) >>> 0;
+    }
+    static UnsignedBitReverse32Trunc(value, bitCount) {
+        return this.UnsignedBitReverse32(value) >>> (32 - bitCount);
+    }
+    static SignedBitReverse32Trunc(value, bitCount) {
+        return this.UnsignedBitReverse32Trunc(value >>> 0, bitCount);
+    }
+    static BitReverse8(value) {
+        if (value > 0xff)
+            throw new Error();
+        if (value < -0x80)
+            throw new Error();
+        value >>>= 0;
+        value = ((value & 0xaa) >>> 1) | ((value & 0x55) << 1);
+        value = ((value & 0xcc) >>> 2) | ((value & 0x33) << 2);
+        return (((value & 0xf0) >>> 4) | ((value & 0x0f) << 4)) >>> 0;
+    }
+    static Clamp(value, min, max) {
+        if (value < min)
+            return min;
+        if (value > max)
+            return max;
+        return value;
+    }
+    static DebugAssert(condition) {
+        if (!condition)
+            throw new Error("DebugAssert failed");
+    }
+}
+HCAUtilFunc.SignedNibbles = [0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1];
 class HCA {
     constructor() {
     }
-    static decrypt(hca, key1 = undefined, key2 = undefined) {
+    static decrypt(hca, key1, key2) {
         return this.decryptOrEncrypt(hca, false, key1, key2);
     }
-    static encrypt(hca, key1 = undefined, key2 = undefined) {
+    static encrypt(hca, key1, key2) {
         return this.decryptOrEncrypt(hca, true, key1, key2);
     }
-    static decryptOrEncrypt(hca, encrypt, key1 = undefined, key2 = undefined) {
+    static decryptOrEncrypt(hca, encrypt, key1, key2) {
         // in-place decryption/encryption
         // parse header
         let info = new HCAInfo(hca); // throws "Not a HCA file" if mismatch
@@ -449,203 +634,74 @@ class HCA {
             volume = 1;
         else if (volume < 0)
             volume = 0;
-        let state = new HCAInternalState(hca); // throws "Not a HCA file" if mismatch
-        let info = state.info;
+        let info = new HCAInfo(hca); // throws "Not a HCA file" if mismatch
+        let frame = new HCAFrame(info);
         if (info.hasHeader["ciph"] && info.cipher != 0) {
             throw new Error("HCA is encrypted, please decrypt it first before decoding");
         }
-        let wavRiff = {
-            id: 0x46464952,
-            size: 0,
-            wave: 0x45564157 // WAVE
-        };
-        let fmt = {
-            id: 0x20746d66,
-            size: 0x10,
-            fmtType: mode > 0 ? 1 : 3,
-            fmtChannelCount: info.format.channelCount,
-            fmtSamplingRate: info.format.samplingRate,
-            fmtSamplesPerSec: 0,
-            fmtSamplingSize: 0,
-            fmtBitCount: mode > 0 ? mode : 32
-        };
-        fmt.fmtSamplingSize = fmt.fmtBitCount / 8 * fmt.fmtChannelCount;
-        fmt.fmtSamplesPerSec = fmt.fmtSamplingRate * fmt.fmtSamplingSize;
-        let smpl = {
-            id: 0x6c706d73,
-            size: 0x3C,
-            manufacturer: 0,
-            product: 0,
-            samplePeriod: 0,
-            MIDIUnityNote: 0x3C,
-            MIDIPitchFraction: 0,
-            SMPTEFormat: 0,
-            SMPTEOffset: 0,
-            sampleLoops: 1,
-            samplerData: 0x18,
-            loop_Identifier: 0,
-            loop_Type: 0,
-            loop_Start: 0,
-            loop_End: 0,
-            loop_Fraction: 0,
-            loop_PlayCount: 0
-        };
-        let note = {
-            id: 0x65746f6e,
-            size: 0,
-            dwName: 0
-        };
-        let data = {
-            id: 0x61746164,
-            size: 0
-        };
-        smpl.samplePeriod = (1 / fmt.fmtSamplingRate * 1000000000);
-        if (info.hasHeader["loop"]) {
-            smpl.loop_Start = info.loopStartAtSample - info.startAtSample;
-            smpl.loop_End = info.loopEndAtSample - info.startAtSample;
-            smpl.SMPTEOffset = 1;
-        }
-        if (info.comment) {
-            note.size = 4 + info.comment.length;
-            if (note.size & 3)
-                note.size += 4 - note.size & 3;
-        }
-        let blockSizeInWav = 0x400 * fmt.fmtSamplingSize;
-        data.size = info.hasHeader["loop"]
-            ? ((info.loopStartAtSample - info.startAtSample) + (info.loopEndAtSample - info.loopStartAtSample) * (loop + 1)) * fmt.fmtSamplingSize
-            : (info.endAtSample - info.startAtSample) * fmt.fmtSamplingSize;
-        wavRiff.size = 0x1C + (info.comment ? 8 + note.size : 0) + 8 + data.size + (info.hasHeader["loop"] ? 68 : 0);
-        let writer = new Uint8Array(wavRiff.size + 8);
-        let p = new DataView(writer.buffer);
-        let ftell = 0;
-        p.setUint32(0, wavRiff.id, true);
-        p.setUint32(4, wavRiff.size, true);
-        p.setUint32(8, wavRiff.wave, true);
-        p.setUint32(12, fmt.id, true);
-        p.setUint32(16, fmt.size, true);
-        p.setUint16(20, fmt.fmtType, true);
-        p.setUint16(22, fmt.fmtChannelCount, true);
-        p.setUint32(24, fmt.fmtSamplingRate, true);
-        p.setUint32(28, fmt.fmtSamplesPerSec, true);
-        p.setUint16(32, fmt.fmtSamplingSize, true);
-        p.setUint16(34, fmt.fmtBitCount, true);
-        ftell += 36;
-        if (info.comment) {
-            p.setUint32(ftell, note.id, true);
-            p.setUint32(ftell + 4, note.size, true);
-            let te = new TextEncoder();
-            writer.set(te.encode(info.comment), ftell + 8);
-            ftell += note.size;
-        }
-        p.setUint32(ftell, data.id, true);
-        p.setUint32(ftell + 4, data.size, true);
-        ftell += 8;
-        let actualEndAtSample = info.hasHeader["loop"] ? info.loopEndAtSample : info.endAtSample;
-        for (let l = 0; l < info.format.blockCount; ++l) {
-            let lastDecodedSamples = l * 0x400;
-            let currentDecodedSamples = lastDecodedSamples + 0x400;
-            if (currentDecodedSamples <= info.startAtSample || lastDecodedSamples >= actualEndAtSample) {
+        // prepare output WAV file
+        const outputWav = new HCAWav(info, mode, loop);
+        const fileBuf = outputWav.fileBuf;
+        const dataPart = outputWav.dataPart;
+        // calculate in-WAV size
+        let inWavSize = info.calcInWavSize(mode);
+        // decode blocks (frames)
+        for (let i = 0, offset = 0; i < info.format.blockCount; i++) {
+            let lastDecodedSamples = i * HCAFrame.SamplesPerFrame;
+            let currentDecodedSamples = lastDecodedSamples + HCAFrame.SamplesPerFrame;
+            if (currentDecodedSamples <= info.startAtSample || lastDecodedSamples >= info.endAtSample) {
                 continue;
             }
-            let startOffset = info.dataOffset + info.blockSize * l;
+            let startOffset = info.dataOffset + info.blockSize * i;
             let block = hca.subarray(startOffset, startOffset + info.blockSize);
-            this.decodeBlock(state, block, mode);
+            this.decodeBlock(frame, block);
             let wavebuff;
-            if (lastDecodedSamples < info.startAtSample || currentDecodedSamples > actualEndAtSample) {
+            if (lastDecodedSamples < info.startAtSample || currentDecodedSamples > info.endAtSample) {
                 // crossing startAtSample/endAtSample, skip/drop specified bytes
-                wavebuff = this.writeToPCM(state, mode, volume);
+                wavebuff = this.writeToPCM(frame, mode, volume);
                 if (lastDecodedSamples < info.startAtSample) {
-                    let skippedSize = (info.startAtSample - lastDecodedSamples) * fmt.fmtSamplingSize;
-                    wavebuff = wavebuff.subarray(skippedSize, blockSizeInWav);
+                    let skippedSize = (info.startAtSample - lastDecodedSamples) * inWavSize.sample;
+                    wavebuff = wavebuff.subarray(skippedSize, inWavSize.block);
                 }
-                else if (currentDecodedSamples > actualEndAtSample) {
-                    let writeSize = (actualEndAtSample - lastDecodedSamples) * fmt.fmtSamplingSize;
+                else if (currentDecodedSamples > info.endAtSample) {
+                    let writeSize = (info.endAtSample - lastDecodedSamples) * inWavSize.sample;
                     wavebuff = wavebuff.subarray(0, writeSize);
                 }
                 else
                     throw Error("should never go here");
-                writer.set(wavebuff, ftell);
+                dataPart.set(wavebuff, offset);
             }
             else {
-                wavebuff = this.writeToPCM(state, mode, volume, writer, ftell);
+                wavebuff = this.writeToPCM(frame, mode, volume, dataPart, offset);
             }
-            ftell += wavebuff.byteLength;
+            offset += wavebuff.byteLength;
         }
         // decoding done, then just copy looping part
         if (info.hasHeader["loop"] && loop) {
             // "tail" beyond loop end is dropped
             // copy looping audio clips
-            let wavDataOffset = writer.byteLength - data.size - 68;
-            let loopSizeInWav = (info.loopEndAtSample - info.loopStartAtSample) * fmt.fmtSamplingSize;
-            let preLoopSizeInWav = (info.loopStartAtSample - info.startAtSample) * fmt.fmtSamplingSize;
-            let loopStartOffsetInWav = wavDataOffset + preLoopSizeInWav;
-            let src = new Uint8Array(writer.buffer, writer.byteOffset + loopStartOffsetInWav, loopSizeInWav);
-            for (let i = 1; i <= loop; i++) {
-                let dst = new Uint8Array(writer.buffer, writer.byteOffset + loopStartOffsetInWav + i * loopSizeInWav, loopSizeInWav);
+            if (inWavSize.loop == null)
+                throw new Error();
+            let preLoopSizeInWav = inWavSize.sample * (info.loopStartAtSample - info.startAtSample);
+            let src = dataPart.subarray(preLoopSizeInWav, preLoopSizeInWav + inWavSize.loop.loopPart);
+            for (let i = 0, start = preLoopSizeInWav + inWavSize.loop.loopPart; i < loop; i++) {
+                let dst = dataPart.subarray(start, start + inWavSize.loop.loopPart);
                 dst.set(src);
-                ftell += dst.byteLength;
+                start += inWavSize.loop.loopPart;
             }
         }
-        if (info.hasHeader["loop"]) {
-            // write smpl section
-            p.setUint32(ftell, smpl.id, true);
-            p.setUint32(ftell + 4, smpl.size, true);
-            p.setUint32(ftell + 8, smpl.manufacturer, true);
-            p.setUint32(ftell + 12, smpl.product, true);
-            p.setUint32(ftell + 16, smpl.samplePeriod, true);
-            p.setUint32(ftell + 20, smpl.MIDIUnityNote, true);
-            p.setUint32(ftell + 24, smpl.MIDIPitchFraction, true);
-            p.setUint32(ftell + 28, smpl.SMPTEFormat, true);
-            p.setUint32(ftell + 32, smpl.SMPTEOffset, true);
-            p.setUint32(ftell + 36, smpl.sampleLoops, true);
-            p.setUint32(ftell + 40, smpl.samplerData, true);
-            p.setUint32(ftell + 44, smpl.loop_Identifier, true);
-            p.setUint32(ftell + 48, smpl.loop_Type, true);
-            p.setUint32(ftell + 52, smpl.loop_Start, true);
-            p.setUint32(ftell + 56, smpl.loop_End, true);
-            p.setUint32(ftell + 60, smpl.loop_Fraction, true);
-            p.setUint32(ftell + 64, smpl.loop_PlayCount, true);
-            ftell += 68;
-        }
-        return writer;
+        return fileBuf;
     }
-    static decodeBlock(state, block, mode = 32) {
-        switch (mode) {
-            case 0: // float
-            case 8:
-            case 16:
-            case 24:
-            case 32: // integer
-                break;
-            default:
-                mode = 32;
-        }
-        let info = state.info;
-        if (block.byteLength < info.blockSize)
-            throw new Error("block.byteLength < info.blockSize");
+    static decodeBlock(frame, block) {
+        let info = frame.Hca;
+        if (block.byteLength != info.blockSize)
+            throw new Error();
         // verify checksum
         HCACrc16.verify(block, info.blockSize - 2);
         // decode
-        let channel = state.channel;
-        let data = new HCABitReader(info.blockSize, block);
-        let magic = data.read(16);
-        if (magic == 0xFFFF) {
-            let a = (data.read(9) << 8) - data.read(7);
-            for (let i = 0; i < info.format.channelCount; i++)
-                HCADecoder.step1(channel[i], data, info.compParam[8], a);
-            for (let i = 0; i < 8; i++) {
-                for (let j = 0; j < info.format.channelCount; j++)
-                    HCADecoder.step2(channel[j], data);
-                for (let j = 0; j < info.format.channelCount; j++)
-                    HCADecoder.step3(channel[j], info.compParam[8], info.compParam[7], info.compParam[6] + info.compParam[5], info.compParam[4]);
-                for (let j = 0; j < info.format.channelCount - 1; j++)
-                    HCADecoder.step4(channel[j], i, info.compParam[4] - info.compParam[5], info.compParam[5], info.compParam[6], channel[j + 1]);
-                for (let j = 0; j < info.format.channelCount; j++)
-                    HCADecoder.step5(channel[j], i);
-            }
-        }
+        HCADecoder.DecodeFrame(block, frame);
     }
-    static writeToPCM(state, mode = 32, volume = 1.0, writer = undefined, ftell = undefined) {
+    static writeToPCM(frame, mode = 32, volume = 1.0, writer, ftell) {
         switch (mode) {
             case 0: // float
             case 8:
@@ -661,26 +717,24 @@ class HCA {
         else if (volume < 0)
             volume = 0;
         // create new writer if not specified
-        let info = state.info;
-        let channel = state.channel;
+        let info = frame.Hca;
         if (writer == null) {
-            writer = new Uint8Array(0x400 * info.format.channelCount * mode / 8);
+            writer = new Uint8Array(HCAFrame.SamplesPerFrame * info.format.channelCount * (mode == 0 ? 32 : mode) / 8);
             if (ftell == null) {
                 ftell = 0;
             }
         }
         else {
-            if (ftell == null) {
-                throw new Error("ftell == null");
-            }
+            if (ftell == null)
+                throw new Error();
         }
         // write decoded data into writer
-        let p = new DataView(writer.buffer);
+        let p = new DataView(writer.buffer, writer.byteOffset, writer.byteLength);
         let ftellBegin = ftell;
-        for (let i = 0; i < 8; i++) {
-            for (let j = 0; j < 0x80; j++) {
-                for (let k = 0; k < info.format.channelCount; k++) {
-                    let f = channel[k].wave[i][j] * volume;
+        for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
+            for (let s = 0; s < HCAFrame.SamplesPerSubFrame; s++) {
+                for (let c = 0; c < frame.Channels.length; c++) {
+                    let f = frame.Channels[c].PcmFloat[sf][s] * volume;
                     if (f > 1)
                         f = 1;
                     else if (f < -1)
@@ -720,7 +774,7 @@ class HCA {
                 }
             }
         }
-        return new Uint8Array(writer.buffer, ftellBegin, ftell - ftellBegin);
+        return writer.subarray(ftellBegin, ftell);
     }
     static fixChecksum(hca) {
         HCAInfo.fixHeaderChecksum(hca);
@@ -733,517 +787,1240 @@ class HCA {
         return hca;
     }
 }
-HCA.scaling_table = scaling_table;
-HCA.scale_conversion_table = scale_conversion_table;
-HCA.range_table = new Float64Array([
-    0, 2.0 / 3, 2.0 / 5, 2.0 / 7,
-    2.0 / 9, 2.0 / 11, 2.0 / 13, 2.0 / 15,
-    2.0 / 31, 2.0 / 63, 2.0 / 127, 2.0 / 255,
-    2.0 / 511, 2.0 / 1023, 2.0 / 2047, 2.0 / 4095
-]);
-class HCAChannelContext {
-    constructor() {
-        this.block = new Float64Array(0x80);
-        this.base = new Float64Array(0x80);
-        this.value = new Uint8Array(0x80);
-        this.scale = new Uint8Array(0x80);
-        this.value2 = new Uint8Array(8);
-        this.type = 0;
-        this.value3 = new Uint8Array(8);
-        this.count = 0; //uint32
-        this.wav1 = new Float64Array(0x80);
-        this.wav2 = new Float64Array(0x80);
-        this.wav3 = new Float64Array(0x80);
-        this.wave = [
-            new Float64Array(0x80), new Float64Array(0x80),
-            new Float64Array(0x80), new Float64Array(0x80),
-            new Float64Array(0x80), new Float64Array(0x80),
-            new Float64Array(0x80), new Float64Array(0x80)
-        ];
-    }
-    cloneTypedArray(obj) {
-        if (obj instanceof Int8Array)
-            return obj.slice(0);
-        if (obj instanceof Uint8Array)
-            return obj.slice(0);
-        if (obj instanceof Uint8ClampedArray)
-            return obj.slice(0);
-        if (obj instanceof Int16Array)
-            return obj.slice(0);
-        if (obj instanceof Uint16Array)
-            return obj.slice(0);
-        if (obj instanceof Int32Array)
-            return obj.slice(0);
-        if (obj instanceof Uint32Array)
-            return obj.slice(0);
-        if (obj instanceof Float32Array)
-            return obj.slice(0);
-        if (obj instanceof Float64Array)
-            return obj.slice(0);
-        return obj;
-    }
-    clone() {
-        // ref: https://stackoverflow.com/questions/28150967/typescript-cloning-object
-        let ret = new HCAChannelContext();
-        for (let key in this) {
-            switch (typeof this[key]) {
-                case "number":
-                    ret[key] = this[key];
-                    break;
-                case "object":
-                    if (this[key] instanceof Array) {
-                        for (let key_ in this[key]) {
-                            ret[key][key_] = this.cloneTypedArray(this[key][key_]);
-                        }
-                    }
-                    else {
-                        ret[key] = this.cloneTypedArray(this[key]);
-                    }
-                    break;
-            }
+class HCAWav {
+    constructor(info, mode = 32, loop = 0) {
+        switch (mode) {
+            case 0: // float
+            case 8:
+            case 16:
+            case 24:
+            case 32: // integer
+                break;
+            default:
+                mode = 32;
         }
+        if (isNaN(loop))
+            throw new Error("loop is not number");
+        loop = Math.floor(loop);
+        if (loop < 0)
+            throw new Error();
+        let inWavSize = info.calcInWavSize(mode);
+        let dataSize = inWavSize.sample * info.sampleCount;
+        if (loop > 0) {
+            if (inWavSize.loop == null)
+                throw new Error();
+            dataSize += inWavSize.loop.loopPart * loop;
+        }
+        // prepare metadata chunks and data chunk header
+        this.fmt = new HCAWavFmtChunk(info, mode);
+        if (info.hasHeader["comm"])
+            this.note = new HCAWavCommentChunk(info);
+        if (info.hasHeader["loop"])
+            this.smpl = new HCAWaveSmplChunk(info);
+        this.waveRiff = new HCAWavWaveRiffHeader(8 + this.fmt.size
+            + (this.note == null ? 0 : 8 + this.note.size)
+            + 8 + dataSize
+            + (this.smpl == null ? 0 : 8 + this.smpl.size));
+        // get bytes of prepared chunks
+        let waveRiffHeader = this.waveRiff.get();
+        let fmtChunk = this.fmt.get();
+        let noteChunk = this.note != null ? this.note.get() : new Uint8Array(0);
+        let dataChunkHeader = new Uint8Array(8);
+        dataChunkHeader.set(new TextEncoder().encode("data"));
+        new DataView(dataChunkHeader.buffer).setUint32(4, dataSize, true);
+        let smplChunk = this.smpl != null ? this.smpl.get() : new Uint8Array(0);
+        // create whole-file buffer
+        this.fileBuf = new Uint8Array(8 + this.waveRiff.size);
+        // copy prepared metadata chunks and data chunk header to whole-file buffer
+        let writtenLength = 0;
+        [waveRiffHeader, fmtChunk, noteChunk, dataChunkHeader].forEach((chunk) => {
+            this.fileBuf.set(chunk, writtenLength);
+            writtenLength += chunk.byteLength;
+        });
+        // skip dataPart since it's empty
+        this.dataPart = this.fileBuf.subarray(writtenLength, writtenLength + dataSize);
+        writtenLength += dataSize;
+        // copy the last prepared chunk to whole-file buffer
+        this.fileBuf.set(smplChunk, writtenLength);
+        writtenLength += smplChunk.byteLength;
+        if (writtenLength != this.fileBuf.byteLength)
+            throw new Error();
+    }
+}
+class HCAWavWaveRiffHeader {
+    constructor(size) {
+        if (isNaN(size))
+            throw new Error("size must be number");
+        size = Math.floor(size);
+        if (size <= 0)
+            throw new Error();
+        this.size = 4 + size; // "WAVE" + remaining part
+    }
+    get() {
+        let buf = new ArrayBuffer(12);
+        let ret = new Uint8Array(buf);
+        let p = new DataView(buf);
+        let te = new TextEncoder();
+        ret.set(te.encode("RIFF"), 0);
+        p.setUint32(4, this.size, true);
+        ret.set(te.encode("WAVE"), 8);
         return ret;
     }
 }
-class HCADecoder {
-    static step1(channel, data, a, b, ath = new Uint8Array(0x80)) {
-        const scalelist = this.consts.scalelist;
-        let v = data.read(3);
-        if (v >= 6)
-            for (let i = 0; i < channel.count; i++)
-                channel.value[i] = data.read(6);
-        else if (v) {
-            let v1 = data.read(6);
-            let v2 = (1 << v) - 1;
-            let v3 = v2 >> 1;
-            let v4 = 0;
-            channel.value[0] = v1;
-            for (let i = 1; i < channel.count; i++) {
-                v4 = data.read(v);
-                if (v4 != v2)
-                    v1 += v4 - v3;
-                else
-                    v1 = data.read(6);
-                channel.value[i] = v1;
-            }
+class HCAWavFmtChunk {
+    constructor(info, mode = 32) {
+        this.size = 16;
+        switch (mode) {
+            case 0: // float
+            case 8:
+            case 16:
+            case 24:
+            case 32: // integer
+                break;
+            default:
+                mode = 32;
         }
-        else
-            channel.value.fill(0);
-        if (channel.type == 2) {
-            v = data.check(4);
-            channel.value2[0] = v;
-            if (v < 15)
-                for (let i = 0; i < 8; i++)
-                    channel.value2[i] = data.read(4);
-        }
-        else
-            for (let i = 0; i < a; i++)
-                channel.value3[i] = data.read(6);
-        for (let i = 0; i < channel.count; i++) {
-            v = channel.value[i];
-            if (v) {
-                v = ath[i] + ((b + i) >> 8) - ((v * 5) >> 1) + 1;
-                if (v < 0)
-                    v = 15;
-                else if (v >= 0x39)
-                    v = 1;
-                else
-                    v = scalelist[v];
-            }
-            channel.scale[i] = v;
-        }
-        channel.scale.fill(0, channel.count);
-        for (let i = 0; i < channel.count; i++)
-            channel.base[i] = HCA.scaling_table[channel.value[i]] * HCA.range_table[channel.scale[i]];
+        let inWavSize = info.calcInWavSize(mode);
+        this.formatTag = mode > 0 ? 1 : 3;
+        this.channelCount = info.format.channelCount;
+        this.samplesPerSec = info.format.samplingRate;
+        this.bytesPerSec = inWavSize.sample * info.format.samplingRate;
+        this.blockAlign = inWavSize.sample;
+        this.bitsPerSample = inWavSize.bitsPerSample;
     }
-    static step2(channel, data) {
-        const list1 = this.consts.list1;
-        const list2 = this.consts.list2;
-        const list3 = this.consts.list3;
-        for (let i = 0; i < channel.count; i++) {
-            let f = 0.0;
-            let s = channel.scale[i];
-            let bitSize = list1[s];
-            let v = data.read(bitSize);
-            if (s < 8) {
-                v += s << 4;
-                data.seek(list2[v] - bitSize);
-                f = list3[v];
+    get() {
+        let buf = new ArrayBuffer(8 + this.size);
+        let ret = new Uint8Array(buf);
+        let p = new DataView(buf);
+        let te = new TextEncoder();
+        ret.set(te.encode("fmt "), 0);
+        p.setUint32(4, this.size, true);
+        p.setUint16(8, this.formatTag, true);
+        p.setUint16(10, this.channelCount, true);
+        p.setUint32(12, this.samplesPerSec, true);
+        p.setUint32(16, this.bytesPerSec, true);
+        p.setUint16(20, this.blockAlign, true);
+        p.setUint16(22, this.bitsPerSample, true);
+        return ret;
+    }
+}
+class HCAWavCommentChunk {
+    constructor(info) {
+        this.commentBuf = new TextEncoder().encode(info.comment);
+        let size = this.commentBuf.byteLength;
+        size += 4;
+        if (size % 4)
+            size += 4 - size % 4;
+        this.size = size;
+    }
+    get() {
+        let buf = new ArrayBuffer(8 + this.size);
+        let ret = new Uint8Array(buf);
+        let p = new DataView(buf);
+        let te = new TextEncoder();
+        ret.set(te.encode("note"), 0);
+        p.setUint32(4, this.size, true);
+        ret.set(this.commentBuf, 8);
+        return ret;
+    }
+}
+class HCAWaveSmplChunk {
+    constructor(info) {
+        this.size = 60;
+        this.manufacturer = 0;
+        this.product = 0;
+        this.MIDIUnityNote = 0x3c;
+        this.MIDIPitchFraction = 0;
+        this.SMPTEFormat = 0;
+        this.sampleLoops = 1;
+        this.samplerData = 0x18;
+        this.loop_Identifier = 0;
+        this.loop_Type = 0;
+        this.loop_Fraction = 0;
+        this.loop_PlayCount = 0;
+        if (!info.hasHeader["loop"])
+            throw new Error("missing \"loop\" header");
+        this.samplePeriod = (1 / info.format.samplingRate * 1000000000);
+        this.loop_Start = info.loopStartAtSample - info.startAtSample;
+        this.loop_End = info.loopEndAtSample - info.startAtSample;
+        this.SMPTEOffset = 1;
+    }
+    get() {
+        let buf = new ArrayBuffer(8 + this.size);
+        let ret = new Uint8Array(buf);
+        let p = new DataView(buf);
+        let te = new TextEncoder();
+        ret.set(te.encode("smpl"), 0);
+        p.setUint32(4, this.size, true);
+        p.setUint32(8, this.manufacturer, true);
+        p.setUint32(12, this.product, true);
+        p.setUint32(16, this.samplePeriod, true);
+        p.setUint32(20, this.MIDIUnityNote, true);
+        p.setUint32(24, this.MIDIPitchFraction, true);
+        p.setUint32(28, this.SMPTEFormat, true);
+        p.setUint32(32, this.SMPTEOffset, true);
+        p.setUint32(36, this.sampleLoops, true);
+        p.setUint32(40, this.samplerData, true);
+        p.setUint32(44, this.loop_Identifier, true);
+        p.setUint32(48, this.loop_Type, true);
+        p.setUint32(52, this.loop_Start, true);
+        p.setUint32(56, this.loop_End, true);
+        p.setUint32(60, this.loop_Fraction, true);
+        p.setUint32(64, this.loop_PlayCount, true);
+        return ret;
+    }
+}
+class HCABitReader {
+    constructor(buffer) {
+        this.Buffer = buffer;
+        this.dv = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+        this.LengthBits = buffer.length * 8;
+        this.Position = 0;
+    }
+    get Remaining() {
+        return this.LengthBits - this.Position;
+    }
+    ReadInt(bitCount) {
+        let value = this.PeekInt(bitCount);
+        this.Position += bitCount;
+        return value;
+    }
+    ReadBool() {
+        return this.ReadInt(1) == 1;
+    }
+    ReadOffsetBinary(bitCount, bias) {
+        let offset = (1 << (bitCount - 1)) - bias;
+        let value = this.PeekInt(bitCount) - offset;
+        this.Position += bitCount;
+        return value;
+    }
+    AlignPosition(multiple) {
+        this.Position = HCAUtilFunc.GetNextMultiple(this.Position, multiple);
+    }
+    PeekInt(bitCount) {
+        HCAUtilFunc.DebugAssert(bitCount >= 0 && bitCount <= 32);
+        if (bitCount > this.Remaining) {
+            if (this.Position >= this.LengthBits)
+                return 0;
+            let extraBits = bitCount - this.Remaining;
+            return this.PeekIntFallback(this.Remaining) << extraBits;
+        }
+        let byteIndex = this.Position / 8;
+        let bitIndex = this.Position % 8;
+        if (bitCount <= 9 && this.Remaining >= 16) {
+            let value = this.dv.getUint16(byteIndex);
+            value &= 0xFFFF >> bitIndex;
+            value >>= 16 - bitCount - bitIndex;
+            return value;
+        }
+        if (bitCount <= 17 && this.Remaining >= 24) {
+            let value = this.dv.getUint16(byteIndex) << 8 | this.dv.getUint8(byteIndex + 2);
+            value &= 0xFFFFFF >> bitIndex;
+            value >>= 24 - bitCount - bitIndex;
+            return value;
+        }
+        if (bitCount <= 25 && this.Remaining >= 32) {
+            let value = this.dv.getUint32(byteIndex);
+            value &= 0xFFFFFFFF >>> bitIndex;
+            value >>= 32 - bitCount - bitIndex;
+            return value;
+        }
+        return this.PeekIntFallback(bitCount);
+    }
+    PeekIntFallback(bitCount) {
+        let value = 0;
+        let byteIndex = this.Position / 8;
+        let bitIndex = this.Position % 8;
+        while (bitCount > 0) {
+            if (bitIndex >= 8) {
+                bitIndex = 0;
+                byteIndex++;
+            }
+            let bitsToRead = Math.min(bitCount, 8 - bitIndex);
+            let mask = 0xFF >> bitIndex;
+            let currentByte = (mask & this.dv.getUint8(byteIndex)) >> (8 - bitIndex - bitsToRead);
+            value = (value << bitsToRead) | currentByte;
+            bitIndex += bitsToRead;
+            bitCount -= bitsToRead;
+        }
+        return value;
+    }
+}
+var HCAOffsetBias;
+(function (HCAOffsetBias) {
+    /// <summary>
+    /// Specifies the bias of an offset binary value. A positive bias can represent one more
+    /// positive value than negative value, and a negative bias can represent one more
+    /// negative value than positive value.
+    /// </summary>
+    /// <remarks>Example:
+    /// A 4-bit offset binary value with a positive bias can store
+    /// the values 8 through -7 inclusive.
+    /// A 4-bit offset binary value with a negative bias can store
+    /// the values 7 through -8 inclusive.</remarks>
+    HCAOffsetBias[HCAOffsetBias["Positive"] = 1] = "Positive";
+    HCAOffsetBias[HCAOffsetBias["Negative"] = 0] = "Negative";
+})(HCAOffsetBias || (HCAOffsetBias = {}));
+class HCABitWriter {
+    constructor(buffer) {
+        this.Position = 0;
+        this.Buffer = buffer;
+        this.dv = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+        this.LengthBits = buffer.length * 8;
+    }
+    get Remaining() { return this.LengthBits - this.Position; }
+    AlignPosition(multiple) {
+        let newPosition = HCAUtilFunc.GetNextMultiple(this.Position, multiple);
+        let bits = newPosition - this.Position;
+        this.Write(0, bits);
+    }
+    Write(value, bitCount) {
+        HCAUtilFunc.DebugAssert(bitCount >= 0 && bitCount <= 32);
+        if (bitCount > this.Remaining) {
+            throw new Error("Not enough bits left in output buffer");
+        }
+        let byteIndex = this.Position / 8;
+        let bitIndex = this.Position % 8;
+        if (bitCount <= 9 && this.Remaining >= 16) {
+            let outValue = ((value << (16 - bitCount)) & 0xFFFF) >> bitIndex;
+            outValue |= this.dv.getUint16(byteIndex);
+            this.dv.setUint16(byteIndex, outValue);
+        }
+        else if (bitCount <= 17 && this.Remaining >= 24) {
+            let outValue = ((value << (24 - bitCount)) & 0xFFFFFF) >> bitIndex;
+            outValue |= this.dv.getUint16(byteIndex) << 8 | this.dv.getUint8(byteIndex + 2);
+            this.dv.setUint16(byteIndex, outValue >>> 8);
+            this.dv.setUint8(byteIndex + 2, outValue & 0xFF);
+        }
+        else if (bitCount <= 25 && this.Remaining >= 32) {
+            let outValue = (((value << (32 - bitCount)) & 0xFFFFFFFF) >>> bitIndex);
+            outValue |= this.dv.getUint32(byteIndex);
+            this.dv.setUint32(byteIndex, outValue);
+        }
+        else {
+            this.WriteFallback(value, bitCount);
+        }
+        this.Position += bitCount;
+    }
+    WriteFallback(value, bitCount) {
+        let byteIndex = this.Position / 8;
+        let bitIndex = this.Position % 8;
+        while (bitCount > 0) {
+            if (bitIndex >= 8) {
+                bitIndex = 0;
+                byteIndex++;
+            }
+            let toShift = 8 - bitIndex - bitCount;
+            let shifted = toShift < 0 ? value >>> -toShift : value << toShift;
+            let bitsToWrite = Math.min(bitCount, 8 - bitIndex);
+            let mask = ((1 << bitsToWrite) - 1) << 8 - bitIndex - bitsToWrite;
+            let outByte = this.dv.getUint8(byteIndex) & ~mask;
+            outByte |= shifted & mask;
+            this.dv.setUint8(byteIndex, outByte);
+            bitIndex += bitsToWrite;
+            bitCount -= bitsToWrite;
+        }
+    }
+}
+class HCAFrame {
+    constructor(hca) {
+        this.AcceptableNoiseLevel = 0;
+        this.EvaluationBoundary = 0;
+        this.Hca = hca;
+        let channelTypes = HCAFrame.GetChannelTypes(hca);
+        this.Channels = [];
+        for (let i = 0; i < hca.format.channelCount; i++) {
+            this.Channels.push(new HCAChannel({
+                Type: channelTypes[i],
+                CodedScaleFactorCount: channelTypes[i] == HCAChannelType.StereoSecondary
+                    ? hca.compDec.BaseBandCount
+                    : hca.compDec.BaseBandCount + hca.compDec.StereoBandCount
+            }));
+        }
+        this.AthCurve = hca.UseAthCurve ? HCAFrame.ScaleAthCurve(hca.format.samplingRate) : new Uint8Array(HCAFrame.SamplesPerSubFrame);
+    }
+    static GetChannelTypes(hca) {
+        let channelsPerTrack = hca.format.channelCount / hca.compDec.TrackCount;
+        if (hca.compDec.StereoBandCount == 0 || channelsPerTrack == 1) {
+            return new Array(8).fill(HCAChannelType);
+        }
+        const Discrete = HCAChannelType.Discrete;
+        const StereoPrimary = HCAChannelType.StereoPrimary;
+        const StereoSecondary = HCAChannelType.StereoSecondary;
+        switch (channelsPerTrack) {
+            case 2: return [StereoPrimary, StereoSecondary];
+            case 3: return [StereoPrimary, StereoSecondary, Discrete];
+            case 4: if (hca.compDec.ChannelConfig != 0)
+                return [StereoPrimary, StereoSecondary, Discrete, Discrete];
+            else
+                return [StereoPrimary, StereoSecondary, StereoPrimary, StereoSecondary];
+            case 5: if (hca.compDec.ChannelConfig > 2)
+                return [StereoPrimary, StereoSecondary, Discrete, Discrete, Discrete];
+            else
+                return [StereoPrimary, StereoSecondary, Discrete, StereoPrimary, StereoSecondary];
+            case 6: return [StereoPrimary, StereoSecondary, Discrete, Discrete, StereoPrimary, StereoSecondary];
+            case 7: return [StereoPrimary, StereoSecondary, Discrete, Discrete, StereoPrimary, StereoSecondary, Discrete];
+            case 8: return [StereoPrimary, StereoSecondary, Discrete, Discrete, StereoPrimary, StereoSecondary, StereoPrimary, StereoSecondary];
+            default: return new Array(channelsPerTrack).fill(HCAChannelType);
+        }
+    }
+    /// <summary>
+    /// Scales an ATH curve to the specified frequency.
+    /// </summary>
+    /// <param name="frequency">The frequency to scale the curve to.</param>
+    /// <returns>The scaled ATH curve</returns>
+    /// <remarks>The original ATH curve is for a frequency of 41856 Hz.</remarks>
+    static ScaleAthCurve(frequency) {
+        var ath = new Uint8Array(HCAFrame.SamplesPerSubFrame);
+        let acc = 0;
+        let i;
+        for (i = 0; i < ath.length; i++) {
+            acc += frequency;
+            let index = acc >> 13;
+            if (index >= HCATables.AthCurve.length) {
+                break;
+            }
+            ath[i] = HCATables.AthCurve[index];
+        }
+        for (; i < ath.length; i++) {
+            ath[i] = 0xff;
+        }
+        return ath;
+    }
+}
+_a = HCAFrame;
+HCAFrame.SubframesPerFrame = 8;
+HCAFrame.SubFrameSamplesBits = 7;
+HCAFrame.SamplesPerSubFrame = 1 << _a.SubFrameSamplesBits;
+HCAFrame.SamplesPerFrame = _a.SubframesPerFrame * _a.SamplesPerSubFrame;
+class HCAChannel {
+    constructor(values) {
+        this.Type = 0;
+        this.CodedScaleFactorCount = 0;
+        this.PcmFloat = Array.from({ length: HCAFrame.SubframesPerFrame }, () => new Float64Array(HCAFrame.SamplesPerSubFrame));
+        this.Spectra = Array.from({ length: HCAFrame.SubframesPerFrame }, () => new Float64Array(HCAFrame.SamplesPerSubFrame));
+        this.ScaledSpectra = Array.from({ length: HCAFrame.SamplesPerSubFrame }, () => new Float64Array(HCAFrame.SubframesPerFrame));
+        this.QuantizedSpectra = Array.from({ length: HCAFrame.SubframesPerFrame }, () => new Int32Array(HCAFrame.SamplesPerSubFrame));
+        this.Gain = new Float64Array(HCAFrame.SamplesPerSubFrame);
+        this.Intensity = new Int32Array(HCAFrame.SubframesPerFrame);
+        this.HfrScales = new Int32Array(8);
+        this.HfrGroupAverageSpectra = new Float64Array(8);
+        this.Mdct = new HCAMdct(HCAFrame.SubFrameSamplesBits, HCATables.MdctWindow, Math.sqrt(2.0 / HCAFrame.SamplesPerSubFrame));
+        this.ScaleFactors = new Int32Array(HCAFrame.SamplesPerSubFrame);
+        this.Resolution = new Int32Array(HCAFrame.SamplesPerSubFrame);
+        this.HeaderLengthBits = 0;
+        this.ScaleFactorDeltaBits = 0;
+        let t = this;
+        for (let key in values) {
+            t[key] = values[key];
+        }
+    }
+}
+var HCAChannelType;
+(function (HCAChannelType) {
+    HCAChannelType[HCAChannelType["Discrete"] = 0] = "Discrete";
+    HCAChannelType[HCAChannelType["StereoPrimary"] = 1] = "StereoPrimary";
+    HCAChannelType[HCAChannelType["StereoSecondary"] = 2] = "StereoSecondary";
+})(HCAChannelType || (HCAChannelType = {}));
+class HCADecoder {
+    static DecodeFrame(audio, frame) {
+        let reader = new HCABitReader(audio);
+        HCAPacking.UnpackFrame(frame, reader);
+        this.DequantizeFrame(frame);
+        this.RestoreMissingBands(frame);
+        this.RunImdct(frame);
+    }
+    static DequantizeFrame(frame) {
+        for (let channel of frame.Channels) {
+            this.CalculateGain(channel);
+        }
+        for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
+            for (let channel of frame.Channels) {
+                for (let s = 0; s < channel.CodedScaleFactorCount; s++) {
+                    channel.Spectra[sf][s] = channel.QuantizedSpectra[sf][s] * channel.Gain[s];
+                }
+            }
+        }
+    }
+    static RestoreMissingBands(frame) {
+        this.ReconstructHighFrequency(frame);
+        this.ApplyIntensityStereo(frame);
+    }
+    static CalculateGain(channel) {
+        for (let i = 0; i < channel.CodedScaleFactorCount; i++) {
+            channel.Gain[i] = HCATables.DequantizerScalingTable[channel.ScaleFactors[i]] * HCATables.QuantizerStepSize[channel.Resolution[i]];
+        }
+    }
+    static ReconstructHighFrequency(frame) {
+        let hca = frame.Hca;
+        if (hca.HfrGroupCount == 0)
+            return;
+        // The last spectral coefficient should always be 0;
+        let totalBandCount = Math.min(hca.compDec.TotalBandCount, 127);
+        let hfrStartBand = hca.compDec.BaseBandCount + hca.compDec.StereoBandCount;
+        let hfrBandCount = Math.min(hca.compDec.HfrBandCount, totalBandCount - hca.compDec.HfrBandCount);
+        for (let channel of frame.Channels) {
+            if (channel.Type == HCAChannelType.StereoSecondary)
+                continue;
+            for (let group = 0, band = 0; group < hca.HfrGroupCount; group++) {
+                for (let i = 0; i < hca.compDec.BandsPerHfrGroup && band < hfrBandCount; band++, i++) {
+                    let highBand = hfrStartBand + band;
+                    let lowBand = hfrStartBand - band - 1;
+                    let index = channel.HfrScales[group] - channel.ScaleFactors[lowBand] + 64;
+                    for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
+                        channel.Spectra[sf][highBand] = HCATables.ScaleConversionTable[index] * channel.Spectra[sf][lowBand];
+                    }
+                }
+            }
+        }
+    }
+    static ApplyIntensityStereo(frame) {
+        if (frame.Hca.compDec.StereoBandCount <= 0)
+            return;
+        for (let c = 0; c < frame.Channels.length; c++) {
+            if (frame.Channels[c].Type != HCAChannelType.StereoPrimary)
+                continue;
+            for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
+                let l = frame.Channels[c].Spectra[sf];
+                let r = frame.Channels[c + 1].Spectra[sf];
+                let ratioL = HCATables.IntensityRatioTable[frame.Channels[c + 1].Intensity[sf]];
+                let ratioR = ratioL - 2.0;
+                for (let b = frame.Hca.compDec.BaseBandCount; b < frame.Hca.compDec.TotalBandCount; b++) {
+                    r[b] = l[b] * ratioR;
+                    l[b] *= ratioL;
+                }
+            }
+        }
+    }
+    static RunImdct(frame) {
+        for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
+            for (let channel of frame.Channels) {
+                channel.Mdct.RunImdct(channel.Spectra[sf], channel.PcmFloat[sf]);
+            }
+        }
+    }
+}
+class HCAPacking {
+    static UnpackFrame(frame, reader) {
+        if (!this.UnpackFrameHeader(frame, reader))
+            return false;
+        this.ReadSpectralCoefficients(frame, reader);
+        return this.UnpackingWasSuccessful(frame, reader);
+    }
+    static PackFrame(frame, outBuffer) {
+        var writer = new HCABitWriter(outBuffer);
+        writer.Write(0xffff, 16);
+        writer.Write(frame.AcceptableNoiseLevel, 9);
+        writer.Write(frame.EvaluationBoundary, 7);
+        for (let channel of frame.Channels) {
+            this.WriteScaleFactors(writer, channel);
+            if (channel.Type == HCAChannelType.StereoSecondary) {
+                for (let i = 0; i < HCAFrame.SubframesPerFrame; i++) {
+                    writer.Write(channel.Intensity[i], 4);
+                }
+            }
+            else if (frame.Hca.HfrGroupCount > 0) {
+                for (let i = 0; i < frame.Hca.HfrGroupCount; i++) {
+                    writer.Write(channel.HfrScales[i], 6);
+                }
+            }
+        }
+        for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
+            for (let channel of frame.Channels) {
+                this.WriteSpectra(writer, channel, sf);
+            }
+        }
+        writer.AlignPosition(8);
+        for (let i = writer.Position / 8; i < frame.Hca.blockSize - 2; i++) {
+            writer.dv.setUint8(i, 0);
+        }
+        this.WriteChecksum(writer, outBuffer);
+    }
+    static CalculateResolution(scaleFactor, noiseLevel) {
+        if (scaleFactor == 0) {
+            return 0;
+        }
+        let curvePosition = noiseLevel - (5 * scaleFactor >> 1) + 2;
+        curvePosition = HCAUtilFunc.Clamp(curvePosition, 0, 58);
+        return HCATables.ScaleToResolutionCurve[curvePosition];
+    }
+    static UnpackFrameHeader(frame, reader) {
+        let syncWord = reader.ReadInt(16);
+        if (syncWord != 0xffff) {
+            throw new Error("Invalid frame header");
+        }
+        let athCurve = frame.AthCurve;
+        frame.AcceptableNoiseLevel = reader.ReadInt(9);
+        frame.EvaluationBoundary = reader.ReadInt(7);
+        for (let channel of frame.Channels) {
+            if (!this.ReadScaleFactors(channel, reader))
+                return false;
+            for (let i = 0; i < frame.EvaluationBoundary; i++) {
+                channel.Resolution[i] = this.CalculateResolution(channel.ScaleFactors[i], athCurve[i] + frame.AcceptableNoiseLevel - 1);
+            }
+            for (let i = frame.EvaluationBoundary; i < channel.CodedScaleFactorCount; i++) {
+                channel.Resolution[i] = this.CalculateResolution(channel.ScaleFactors[i], athCurve[i] + frame.AcceptableNoiseLevel);
+            }
+            if (channel.Type == HCAChannelType.StereoSecondary) {
+                this.ReadIntensity(reader, channel.Intensity);
+            }
+            else if (frame.Hca.HfrGroupCount > 0) {
+                this.ReadHfrScaleFactors(reader, frame.Hca.HfrGroupCount, channel.HfrScales);
+            }
+        }
+        return true;
+    }
+    static ReadScaleFactors(channel, reader) {
+        channel.ScaleFactorDeltaBits = reader.ReadInt(3);
+        if (channel.ScaleFactorDeltaBits == 0) {
+            channel.ScaleFactors.fill(0, 0, channel.ScaleFactors.length);
+            return true;
+        }
+        if (channel.ScaleFactorDeltaBits >= 6) {
+            for (let i = 0; i < channel.CodedScaleFactorCount; i++) {
+                channel.ScaleFactors[i] = reader.ReadInt(6);
+            }
+            return true;
+        }
+        return this.DeltaDecode(reader, channel.ScaleFactorDeltaBits, 6, channel.CodedScaleFactorCount, channel.ScaleFactors);
+    }
+    static ReadIntensity(reader, intensity) {
+        for (let i = 0; i < HCAFrame.SubframesPerFrame; i++) {
+            intensity[i] = reader.ReadInt(4);
+        }
+    }
+    static ReadHfrScaleFactors(reader, groupCount, hfrScale) {
+        for (let i = 0; i < groupCount; i++) {
+            hfrScale[i] = reader.ReadInt(6);
+        }
+    }
+    static ReadSpectralCoefficients(frame, reader) {
+        for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
+            for (let channel of frame.Channels) {
+                for (let s = 0; s < channel.CodedScaleFactorCount; s++) {
+                    let resolution = channel.Resolution[s];
+                    let bits = HCATables.QuantizedSpectrumMaxBits[resolution];
+                    let code = reader.PeekInt(bits);
+                    if (resolution < 8) {
+                        bits = HCATables.QuantizedSpectrumBits[resolution][code];
+                        channel.QuantizedSpectra[sf][s] = HCATables.QuantizedSpectrumValue[resolution][code];
+                    }
+                    else {
+                        // Read the sign-magnitude value. The low bit is the sign
+                        let quantizedCoefficient = (code >> 1) * (1 - (code % 2 * 2));
+                        if (quantizedCoefficient == 0) {
+                            bits--;
+                        }
+                        channel.QuantizedSpectra[sf][s] = quantizedCoefficient;
+                    }
+                    reader.Position += bits;
+                }
+                channel.Spectra[sf].fill(0, channel.CodedScaleFactorCount, channel.CodedScaleFactorCount + 0x80 - channel.CodedScaleFactorCount);
+            }
+        }
+    }
+    static DeltaDecode(reader, deltaBits, dataBits, count, output) {
+        output[0] = reader.ReadInt(dataBits);
+        let maxDelta = 1 << (deltaBits - 1);
+        let maxValue = (1 << dataBits) - 1;
+        for (let i = 1; i < count; i++) {
+            let delta = reader.ReadOffsetBinary(deltaBits, HCAOffsetBias.Positive);
+            if (delta < maxDelta) {
+                let value = output[i - 1] + delta;
+                if (value < 0 || value > maxValue) {
+                    return false;
+                }
+                output[i] = value;
             }
             else {
-                v = (1 - ((v & 1) << 1)) * (v >> 1);
-                if (!v)
-                    data.seek(-1);
-                f = v;
+                output[i] = reader.ReadInt(dataBits);
             }
-            channel.block[i] = channel.base[i] * f;
         }
-        channel.block.fill(0, channel.count);
+        return true;
     }
-    static step3(channel, a, b, c, d) {
-        if (channel.type != 2 && b > 0) {
-            const listFloat = new Float32Array(this.consts.listInt.buffer);
-            for (let i = 0; i < a; i++) {
-                for (let j = 0, k = c, l = c - 1; j < b && k < d; j++, l--) {
-                    channel.block[k++] = listFloat[0x40 + channel.value3[i] - channel.value[l]] * channel.block[l];
+    static UnpackingWasSuccessful(frame, reader) {
+        // 128 leftover bits after unpacking should be high enough to get rid of false negatives,
+        // and low enough that false positives will be uncommon.
+        return reader.Remaining >= 16 && reader.Remaining <= 128
+            || this.FrameEmpty(frame)
+            || frame.AcceptableNoiseLevel == 0 && reader.Remaining >= 16;
+    }
+    static FrameEmpty(frame) {
+        if (frame.AcceptableNoiseLevel > 0)
+            return false;
+        // If all the scale factors are 0, the frame is empty
+        for (let channel of frame.Channels) {
+            if (channel.ScaleFactorDeltaBits > 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+    static WriteChecksum(writer, hcaBuffer) {
+        writer.Position = writer.LengthBits - 16;
+        let crc16 = HCACrc16.calc(hcaBuffer, hcaBuffer.length - 2);
+        writer.Write(crc16, 16);
+    }
+    static WriteSpectra(writer, channel, subFrame) {
+        for (let i = 0; i < channel.CodedScaleFactorCount; i++) {
+            let resolution = channel.Resolution[i];
+            let quantizedSpectra = channel.QuantizedSpectra[subFrame][i];
+            if (resolution == 0)
+                continue;
+            if (resolution < 8) {
+                let bits = HCATables.QuantizeSpectrumBits[resolution][quantizedSpectra + 8];
+                writer.Write(HCATables.QuantizeSpectrumValue[resolution][quantizedSpectra + 8], bits);
+            }
+            else if (resolution < 16) {
+                let bits = HCATables.QuantizedSpectrumMaxBits[resolution] - 1;
+                writer.Write(Math.abs(quantizedSpectra), bits);
+                if (quantizedSpectra != 0) {
+                    writer.Write(quantizedSpectra > 0 ? 0 : 1, 1);
                 }
             }
-            channel.block[0x80 - 1] = 0;
         }
     }
-    static step4(channel, index, a, b, c, next) {
-        if (channel.type == 1 && c) {
-            const listFloat = this.consts.listFloat;
-            let f1 = listFloat[next.value2[index]];
-            let f2 = f1 - 2.0;
-            for (let i = 0; i < a; i++) {
-                next.block[b + i] = channel.block[b + i] * f2;
-                channel.block[b + i] = channel.block[b + i] * f1;
+    static WriteScaleFactors(writer, channel) {
+        let deltaBits = channel.ScaleFactorDeltaBits;
+        let scales = channel.ScaleFactors;
+        writer.Write(deltaBits, 3);
+        if (deltaBits == 0)
+            return;
+        if (deltaBits == 6) {
+            for (let i = 0; i < channel.CodedScaleFactorCount; i++) {
+                writer.Write(scales[i], 6);
+            }
+            return;
+        }
+        writer.Write(scales[0], 6);
+        let maxDelta = (1 << (deltaBits - 1)) - 1;
+        let escapeValue = (1 << deltaBits) - 1;
+        for (let i = 1; i < channel.CodedScaleFactorCount; i++) {
+            let delta = scales[i] - scales[i - 1];
+            if (Math.abs(delta) > maxDelta) {
+                writer.Write(escapeValue, deltaBits);
+                writer.Write(scales[i], 6);
+            }
+            else {
+                writer.Write(maxDelta + delta, deltaBits);
             }
         }
-    }
-    static step5(channel, index) {
-        const list1Int = this.consts.list1Int;
-        const list2Int = this.consts.list2Int;
-        const list3Int = this.consts.list3Int;
-        let s = channel.block, s0 = 0;
-        let d = channel.wav1, d0 = 0;
-        for (let i = 0, count1 = 1, count2 = 0x40; i < 7; i++, count1 <<= 1, count2 >>= 1) {
-            let d1 = 0;
-            let d2 = count2;
-            for (let j = 0; j < count1; j++) {
-                for (let k = 0; k < count2; k++) {
-                    let a = s[s0++];
-                    let b = s[s0++];
-                    d[d0 + d1++] = b + a;
-                    d[d0 + d2++] = a - b;
-                }
-                d1 += count2;
-                d2 += count2;
-            }
-            let w = s;
-            d0 = s0 - 0x80;
-            s = d;
-            s0 = 0;
-            d = w;
-        }
-        s = channel.wav1;
-        d = channel.block;
-        for (let i = 0, count1 = 0x40, count2 = 1; i < 7; i++, count1 >>= 1, count2 <<= 1) {
-            let list1Float = new Float32Array(list1Int[i].buffer), l0 = 0;
-            let list2Float = new Float32Array(list2Int[i].buffer), l1 = 0;
-            let s1 = 0;
-            let s2 = count2;
-            let d1 = 0;
-            let d2 = count2 * 2 - 1;
-            for (let j = 0; j < count1; j++) {
-                for (let k = 0; k < count2; k++) {
-                    let a = s[s1++];
-                    let b = s[s2++];
-                    let c = list1Float[l0++];
-                    let e = list2Float[l1++];
-                    d[d1++] = a * c - b * e;
-                    d[d2--] = a * e + b * c;
-                }
-                s1 += count2;
-                s2 += count2;
-                d1 += count2;
-                d2 += count2 * 3;
-            }
-            let w = s;
-            s = d;
-            d = w;
-        }
-        d = channel.wav2;
-        d.set(s);
-        let list3Float = new Float32Array(list3Int.buffer);
-        s0 = 0;
-        d = channel.wave[index];
-        d0 = 0;
-        let s1 = 0x40;
-        let s2 = 0;
-        for (let i = 0; i < 0x40; i++)
-            d[d0++] = channel.wav2[s1++] * list3Float[s0++] + channel.wav3[s2++];
-        for (let i = 0; i < 0x40; i++)
-            d[d0++] = channel.wav2[--s1] * list3Float[s0++] - channel.wav3[s2++];
-        s1 = 0x40 - 1;
-        s2 = 0;
-        for (let i = 0; i < 0x40; i++)
-            channel.wav3[s2++] = list3Float[--s0] * channel.wav2[s1--];
-        for (let i = 0; i < 0x40; i++)
-            channel.wav3[s2++] = list3Float[--s0] * channel.wav2[++s1];
     }
 }
-HCADecoder.consts = {
-    // step1
-    scalelist: new Uint8Array([
-        0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0D, 0x0D,
-        0x0D, 0x0D, 0x0D, 0x0D, 0x0C, 0x0C, 0x0C, 0x0C,
-        0x0C, 0x0C, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B,
-        0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x09,
-        0x09, 0x09, 0x09, 0x09, 0x09, 0x08, 0x08, 0x08,
-        0x08, 0x08, 0x08, 0x07, 0x06, 0x06, 0x05, 0x04,
-        0x04, 0x04, 0x03, 0x03, 0x03, 0x02, 0x02, 0x02,
-        // v2.0
-        0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        // v1.3
-        //0x02,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
-    ]),
-    // step2
-    list1: new Uint8Array([0, 2, 3, 3, 4, 4, 4, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
-    list2: new Uint8Array([
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        1, 1, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        2, 2, 2, 2, 2, 2, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0,
-        2, 2, 3, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0,
-        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4,
-        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4,
-        3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-        3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    ]),
-    list3: new Int8Array([
-        +0, +0, +0, +0, +0, +0, +0, +0, +0, +0, +0, +0, +0, +0, +0, +0,
-        +0, +0, +1, -1, +0, +0, +0, +0, +0, +0, +0, +0, +0, +0, +0, +0,
-        +0, +0, +1, +1, -1, -1, +2, -2, +0, +0, +0, +0, +0, +0, +0, +0,
-        +0, +0, +1, -1, +2, -2, +3, -3, +0, +0, +0, +0, +0, +0, +0, +0,
-        +0, +0, +1, +1, -1, -1, +2, +2, -2, -2, +3, +3, -3, -3, +4, -4,
-        +0, +0, +1, +1, -1, -1, +2, +2, -2, -2, +3, -3, +4, -4, +5, -5,
-        +0, +0, +1, +1, -1, -1, +2, -2, +3, -3, +4, -4, +5, -5, +6, -6,
-        +0, +0, +1, -1, +2, -2, +3, -3, +4, -4, +5, -5, +6, -6, +7, -7,
-    ]),
-    // step3
-    listInt: new Uint32Array([
-        0x00000000, 0x00000000, 0x32A0B051, 0x32D61B5E, 0x330EA43A, 0x333E0F68, 0x337D3E0C, 0x33A8B6D5,
-        0x33E0CCDF, 0x3415C3FF, 0x34478D75, 0x3484F1F6, 0x34B123F6, 0x34EC0719, 0x351D3EDA, 0x355184DF,
-        0x358B95C2, 0x35B9FCD2, 0x35F7D0DF, 0x36251958, 0x365BFBB8, 0x36928E72, 0x36C346CD, 0x370218AF,
-        0x372D583F, 0x3766F85B, 0x3799E046, 0x37CD078C, 0x3808980F, 0x38360094, 0x38728177, 0x38A18FAF,
-        0x38D744FD, 0x390F6A81, 0x393F179A, 0x397E9E11, 0x39A9A15B, 0x39E2055B, 0x3A16942D, 0x3A48A2D8,
-        0x3A85AAC3, 0x3AB21A32, 0x3AED4F30, 0x3B1E196E, 0x3B52A81E, 0x3B8C57CA, 0x3BBAFF5B, 0x3BF9295A,
-        0x3C25FED7, 0x3C5D2D82, 0x3C935A2B, 0x3CC4563F, 0x3D02CD87, 0x3D2E4934, 0x3D68396A, 0x3D9AB62B,
-        0x3DCE248C, 0x3E0955EE, 0x3E36FD92, 0x3E73D290, 0x3EA27043, 0x3ED87039, 0x3F1031DC, 0x3F40213B,
-        //
-        0x3F800000, 0x3FAA8D26, 0x3FE33F89, 0x4017657D, 0x4049B9BE, 0x40866491, 0x40B311C4, 0x40EE9910,
-        0x411EF532, 0x4153CCF1, 0x418D1ADF, 0x41BC034A, 0x41FA83B3, 0x4226E595, 0x425E60F5, 0x429426FF,
-        0x42C5672A, 0x43038359, 0x432F3B79, 0x43697C38, 0x439B8D3A, 0x43CF4319, 0x440A14D5, 0x4437FBF0,
-        0x4475257D, 0x44A3520F, 0x44D99D16, 0x4510FA4D, 0x45412C4D, 0x4580B1ED, 0x45AB7A3A, 0x45E47B6D,
-        0x461837F0, 0x464AD226, 0x46871F62, 0x46B40AAF, 0x46EFE4BA, 0x471FD228, 0x4754F35B, 0x478DDF04,
-        0x47BD08A4, 0x47FBDFED, 0x4827CD94, 0x485F9613, 0x4894F4F0, 0x48C67991, 0x49043A29, 0x49302F0E,
-        0x496AC0C7, 0x499C6573, 0x49D06334, 0x4A0AD4C6, 0x4A38FBAF, 0x4A767A41, 0x4AA43516, 0x4ADACB94,
-        0x4B11C3D3, 0x4B4238D2, 0x4B8164D2, 0x4BAC6897, 0x4BE5B907, 0x4C190B88, 0x4C4BEC15, 0x00000000,
-    ]),
-    // step4
-    listFloat: new Float64Array([
-        2, 13 / 7.0, 12 / 7.0, 11 / 7.0, 10 / 7.0, 9 / 7.0, 8 / 7.0, 1,
-        6 / 7.0, 5 / 7.0, 4 / 7.0, 3 / 7.0, 2 / 7.0, 1 / 7.0, 0, 0
-    ]),
-    // step5
-    list1Int: [
-        new Uint32Array([
-            0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75,
-            0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75,
-            0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75,
-            0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75,
-            0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75,
-            0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75,
-            0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75,
-            0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75, 0x3DA73D75,
-        ]),
-        new Uint32Array([
-            0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31,
-            0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31,
-            0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31,
-            0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31,
-            0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31,
-            0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31,
-            0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31,
-            0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31, 0x3F7B14BE, 0x3F54DB31,
-        ]),
-        new Uint32Array([
-            0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403, 0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403,
-            0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403, 0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403,
-            0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403, 0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403,
-            0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403, 0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403,
-            0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403, 0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403,
-            0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403, 0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403,
-            0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403, 0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403,
-            0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403, 0x3F7EC46D, 0x3F74FA0B, 0x3F61C598, 0x3F45E403,
-        ]),
-        new Uint32Array([
-            0x3F7FB10F, 0x3F7D3AAC, 0x3F7853F8, 0x3F710908, 0x3F676BD8, 0x3F5B941A, 0x3F4D9F02, 0x3F3DAEF9,
-            0x3F7FB10F, 0x3F7D3AAC, 0x3F7853F8, 0x3F710908, 0x3F676BD8, 0x3F5B941A, 0x3F4D9F02, 0x3F3DAEF9,
-            0x3F7FB10F, 0x3F7D3AAC, 0x3F7853F8, 0x3F710908, 0x3F676BD8, 0x3F5B941A, 0x3F4D9F02, 0x3F3DAEF9,
-            0x3F7FB10F, 0x3F7D3AAC, 0x3F7853F8, 0x3F710908, 0x3F676BD8, 0x3F5B941A, 0x3F4D9F02, 0x3F3DAEF9,
-            0x3F7FB10F, 0x3F7D3AAC, 0x3F7853F8, 0x3F710908, 0x3F676BD8, 0x3F5B941A, 0x3F4D9F02, 0x3F3DAEF9,
-            0x3F7FB10F, 0x3F7D3AAC, 0x3F7853F8, 0x3F710908, 0x3F676BD8, 0x3F5B941A, 0x3F4D9F02, 0x3F3DAEF9,
-            0x3F7FB10F, 0x3F7D3AAC, 0x3F7853F8, 0x3F710908, 0x3F676BD8, 0x3F5B941A, 0x3F4D9F02, 0x3F3DAEF9,
-            0x3F7FB10F, 0x3F7D3AAC, 0x3F7853F8, 0x3F710908, 0x3F676BD8, 0x3F5B941A, 0x3F4D9F02, 0x3F3DAEF9,
-        ]),
-        new Uint32Array([
-            0x3F7FEC43, 0x3F7F4E6D, 0x3F7E1324, 0x3F7C3B28, 0x3F79C79D, 0x3F76BA07, 0x3F731447, 0x3F6ED89E,
-            0x3F6A09A7, 0x3F64AA59, 0x3F5EBE05, 0x3F584853, 0x3F514D3D, 0x3F49D112, 0x3F41D870, 0x3F396842,
-            0x3F7FEC43, 0x3F7F4E6D, 0x3F7E1324, 0x3F7C3B28, 0x3F79C79D, 0x3F76BA07, 0x3F731447, 0x3F6ED89E,
-            0x3F6A09A7, 0x3F64AA59, 0x3F5EBE05, 0x3F584853, 0x3F514D3D, 0x3F49D112, 0x3F41D870, 0x3F396842,
-            0x3F7FEC43, 0x3F7F4E6D, 0x3F7E1324, 0x3F7C3B28, 0x3F79C79D, 0x3F76BA07, 0x3F731447, 0x3F6ED89E,
-            0x3F6A09A7, 0x3F64AA59, 0x3F5EBE05, 0x3F584853, 0x3F514D3D, 0x3F49D112, 0x3F41D870, 0x3F396842,
-            0x3F7FEC43, 0x3F7F4E6D, 0x3F7E1324, 0x3F7C3B28, 0x3F79C79D, 0x3F76BA07, 0x3F731447, 0x3F6ED89E,
-            0x3F6A09A7, 0x3F64AA59, 0x3F5EBE05, 0x3F584853, 0x3F514D3D, 0x3F49D112, 0x3F41D870, 0x3F396842,
-        ]),
-        new Uint32Array([
-            0x3F7FFB11, 0x3F7FD397, 0x3F7F84AB, 0x3F7F0E58, 0x3F7E70B0, 0x3F7DABCC, 0x3F7CBFC9, 0x3F7BACCD,
-            0x3F7A7302, 0x3F791298, 0x3F778BC5, 0x3F75DEC6, 0x3F740BDD, 0x3F721352, 0x3F6FF573, 0x3F6DB293,
-            0x3F6B4B0C, 0x3F68BF3C, 0x3F660F88, 0x3F633C5A, 0x3F604621, 0x3F5D2D53, 0x3F59F26A, 0x3F5695E5,
-            0x3F531849, 0x3F4F7A1F, 0x3F4BBBF8, 0x3F47DE65, 0x3F43E200, 0x3F3FC767, 0x3F3B8F3B, 0x3F373A23,
-            0x3F7FFB11, 0x3F7FD397, 0x3F7F84AB, 0x3F7F0E58, 0x3F7E70B0, 0x3F7DABCC, 0x3F7CBFC9, 0x3F7BACCD,
-            0x3F7A7302, 0x3F791298, 0x3F778BC5, 0x3F75DEC6, 0x3F740BDD, 0x3F721352, 0x3F6FF573, 0x3F6DB293,
-            0x3F6B4B0C, 0x3F68BF3C, 0x3F660F88, 0x3F633C5A, 0x3F604621, 0x3F5D2D53, 0x3F59F26A, 0x3F5695E5,
-            0x3F531849, 0x3F4F7A1F, 0x3F4BBBF8, 0x3F47DE65, 0x3F43E200, 0x3F3FC767, 0x3F3B8F3B, 0x3F373A23,
-        ]),
-        new Uint32Array([
-            0x3F7FFEC4, 0x3F7FF4E6, 0x3F7FE129, 0x3F7FC38F, 0x3F7F9C18, 0x3F7F6AC7, 0x3F7F2F9D, 0x3F7EEA9D,
-            0x3F7E9BC9, 0x3F7E4323, 0x3F7DE0B1, 0x3F7D7474, 0x3F7CFE73, 0x3F7C7EB0, 0x3F7BF531, 0x3F7B61FC,
-            0x3F7AC516, 0x3F7A1E84, 0x3F796E4E, 0x3F78B47B, 0x3F77F110, 0x3F772417, 0x3F764D97, 0x3F756D97,
-            0x3F748422, 0x3F73913F, 0x3F7294F8, 0x3F718F57, 0x3F708066, 0x3F6F6830, 0x3F6E46BE, 0x3F6D1C1D,
-            0x3F6BE858, 0x3F6AAB7B, 0x3F696591, 0x3F6816A8, 0x3F66BECC, 0x3F655E0B, 0x3F63F473, 0x3F628210,
-            0x3F6106F2, 0x3F5F8327, 0x3F5DF6BE, 0x3F5C61C7, 0x3F5AC450, 0x3F591E6A, 0x3F577026, 0x3F55B993,
-            0x3F53FAC3, 0x3F5233C6, 0x3F5064AF, 0x3F4E8D90, 0x3F4CAE79, 0x3F4AC77F, 0x3F48D8B3, 0x3F46E22A,
-            0x3F44E3F5, 0x3F42DE29, 0x3F40D0DA, 0x3F3EBC1B, 0x3F3CA003, 0x3F3A7CA4, 0x3F385216, 0x3F36206C,
-        ])
-    ],
-    list2Int: [
-        new Uint32Array([
-            0xBD0A8BD4, 0x3D0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4,
-            0x3D0A8BD4, 0xBD0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4,
-            0x3D0A8BD4, 0xBD0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4,
-            0xBD0A8BD4, 0x3D0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4,
-            0x3D0A8BD4, 0xBD0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4,
-            0xBD0A8BD4, 0x3D0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4,
-            0xBD0A8BD4, 0x3D0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4,
-            0x3D0A8BD4, 0xBD0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4, 0x3D0A8BD4, 0x3D0A8BD4, 0xBD0A8BD4,
-        ]),
-        new Uint32Array([
-            0xBE47C5C2, 0xBF0E39DA, 0x3E47C5C2, 0x3F0E39DA, 0x3E47C5C2, 0x3F0E39DA, 0xBE47C5C2, 0xBF0E39DA,
-            0x3E47C5C2, 0x3F0E39DA, 0xBE47C5C2, 0xBF0E39DA, 0xBE47C5C2, 0xBF0E39DA, 0x3E47C5C2, 0x3F0E39DA,
-            0x3E47C5C2, 0x3F0E39DA, 0xBE47C5C2, 0xBF0E39DA, 0xBE47C5C2, 0xBF0E39DA, 0x3E47C5C2, 0x3F0E39DA,
-            0xBE47C5C2, 0xBF0E39DA, 0x3E47C5C2, 0x3F0E39DA, 0x3E47C5C2, 0x3F0E39DA, 0xBE47C5C2, 0xBF0E39DA,
-            0x3E47C5C2, 0x3F0E39DA, 0xBE47C5C2, 0xBF0E39DA, 0xBE47C5C2, 0xBF0E39DA, 0x3E47C5C2, 0x3F0E39DA,
-            0xBE47C5C2, 0xBF0E39DA, 0x3E47C5C2, 0x3F0E39DA, 0x3E47C5C2, 0x3F0E39DA, 0xBE47C5C2, 0xBF0E39DA,
-            0xBE47C5C2, 0xBF0E39DA, 0x3E47C5C2, 0x3F0E39DA, 0x3E47C5C2, 0x3F0E39DA, 0xBE47C5C2, 0xBF0E39DA,
-            0x3E47C5C2, 0x3F0E39DA, 0xBE47C5C2, 0xBF0E39DA, 0xBE47C5C2, 0xBF0E39DA, 0x3E47C5C2, 0x3F0E39DA,
-        ]),
-        new Uint32Array([
-            0xBDC8BD36, 0xBE94A031, 0xBEF15AEA, 0xBF226799, 0x3DC8BD36, 0x3E94A031, 0x3EF15AEA, 0x3F226799,
-            0x3DC8BD36, 0x3E94A031, 0x3EF15AEA, 0x3F226799, 0xBDC8BD36, 0xBE94A031, 0xBEF15AEA, 0xBF226799,
-            0x3DC8BD36, 0x3E94A031, 0x3EF15AEA, 0x3F226799, 0xBDC8BD36, 0xBE94A031, 0xBEF15AEA, 0xBF226799,
-            0xBDC8BD36, 0xBE94A031, 0xBEF15AEA, 0xBF226799, 0x3DC8BD36, 0x3E94A031, 0x3EF15AEA, 0x3F226799,
-            0x3DC8BD36, 0x3E94A031, 0x3EF15AEA, 0x3F226799, 0xBDC8BD36, 0xBE94A031, 0xBEF15AEA, 0xBF226799,
-            0xBDC8BD36, 0xBE94A031, 0xBEF15AEA, 0xBF226799, 0x3DC8BD36, 0x3E94A031, 0x3EF15AEA, 0x3F226799,
-            0xBDC8BD36, 0xBE94A031, 0xBEF15AEA, 0xBF226799, 0x3DC8BD36, 0x3E94A031, 0x3EF15AEA, 0x3F226799,
-            0x3DC8BD36, 0x3E94A031, 0x3EF15AEA, 0x3F226799, 0xBDC8BD36, 0xBE94A031, 0xBEF15AEA, 0xBF226799,
-        ]),
-        new Uint32Array([
-            0xBD48FB30, 0xBE164083, 0xBE78CFCC, 0xBEAC7CD4, 0xBEDAE880, 0xBF039C3D, 0xBF187FC0, 0xBF2BEB4A,
-            0x3D48FB30, 0x3E164083, 0x3E78CFCC, 0x3EAC7CD4, 0x3EDAE880, 0x3F039C3D, 0x3F187FC0, 0x3F2BEB4A,
-            0x3D48FB30, 0x3E164083, 0x3E78CFCC, 0x3EAC7CD4, 0x3EDAE880, 0x3F039C3D, 0x3F187FC0, 0x3F2BEB4A,
-            0xBD48FB30, 0xBE164083, 0xBE78CFCC, 0xBEAC7CD4, 0xBEDAE880, 0xBF039C3D, 0xBF187FC0, 0xBF2BEB4A,
-            0x3D48FB30, 0x3E164083, 0x3E78CFCC, 0x3EAC7CD4, 0x3EDAE880, 0x3F039C3D, 0x3F187FC0, 0x3F2BEB4A,
-            0xBD48FB30, 0xBE164083, 0xBE78CFCC, 0xBEAC7CD4, 0xBEDAE880, 0xBF039C3D, 0xBF187FC0, 0xBF2BEB4A,
-            0xBD48FB30, 0xBE164083, 0xBE78CFCC, 0xBEAC7CD4, 0xBEDAE880, 0xBF039C3D, 0xBF187FC0, 0xBF2BEB4A,
-            0x3D48FB30, 0x3E164083, 0x3E78CFCC, 0x3EAC7CD4, 0x3EDAE880, 0x3F039C3D, 0x3F187FC0, 0x3F2BEB4A,
-        ]),
-        new Uint32Array([
-            0xBCC90AB0, 0xBD96A905, 0xBDFAB273, 0xBE2F10A2, 0xBE605C13, 0xBE888E93, 0xBEA09AE5, 0xBEB8442A,
-            0xBECF7BCA, 0xBEE63375, 0xBEFC5D27, 0xBF08F59B, 0xBF13682A, 0xBF1D7FD1, 0xBF273656, 0xBF3085BB,
-            0x3CC90AB0, 0x3D96A905, 0x3DFAB273, 0x3E2F10A2, 0x3E605C13, 0x3E888E93, 0x3EA09AE5, 0x3EB8442A,
-            0x3ECF7BCA, 0x3EE63375, 0x3EFC5D27, 0x3F08F59B, 0x3F13682A, 0x3F1D7FD1, 0x3F273656, 0x3F3085BB,
-            0x3CC90AB0, 0x3D96A905, 0x3DFAB273, 0x3E2F10A2, 0x3E605C13, 0x3E888E93, 0x3EA09AE5, 0x3EB8442A,
-            0x3ECF7BCA, 0x3EE63375, 0x3EFC5D27, 0x3F08F59B, 0x3F13682A, 0x3F1D7FD1, 0x3F273656, 0x3F3085BB,
-            0xBCC90AB0, 0xBD96A905, 0xBDFAB273, 0xBE2F10A2, 0xBE605C13, 0xBE888E93, 0xBEA09AE5, 0xBEB8442A,
-            0xBECF7BCA, 0xBEE63375, 0xBEFC5D27, 0xBF08F59B, 0xBF13682A, 0xBF1D7FD1, 0xBF273656, 0xBF3085BB,
-        ]),
-        new Uint32Array([
-            0xBC490E90, 0xBD16C32C, 0xBD7B2B74, 0xBDAFB680, 0xBDE1BC2E, 0xBE09CF86, 0xBE22ABB6, 0xBE3B6ECF,
-            0xBE541501, 0xBE6C9A7F, 0xBE827DC0, 0xBE8E9A22, 0xBE9AA086, 0xBEA68F12, 0xBEB263EF, 0xBEBE1D4A,
-            0xBEC9B953, 0xBED53641, 0xBEE0924F, 0xBEEBCBBB, 0xBEF6E0CB, 0xBF00E7E4, 0xBF064B82, 0xBF0B9A6B,
-            0xBF10D3CD, 0xBF15F6D9, 0xBF1B02C6, 0xBF1FF6CB, 0xBF24D225, 0xBF299415, 0xBF2E3BDE, 0xBF32C8C9,
-            0x3C490E90, 0x3D16C32C, 0x3D7B2B74, 0x3DAFB680, 0x3DE1BC2E, 0x3E09CF86, 0x3E22ABB6, 0x3E3B6ECF,
-            0x3E541501, 0x3E6C9A7F, 0x3E827DC0, 0x3E8E9A22, 0x3E9AA086, 0x3EA68F12, 0x3EB263EF, 0x3EBE1D4A,
-            0x3EC9B953, 0x3ED53641, 0x3EE0924F, 0x3EEBCBBB, 0x3EF6E0CB, 0x3F00E7E4, 0x3F064B82, 0x3F0B9A6B,
-            0x3F10D3CD, 0x3F15F6D9, 0x3F1B02C6, 0x3F1FF6CB, 0x3F24D225, 0x3F299415, 0x3F2E3BDE, 0x3F32C8C9,
-        ]),
-        new Uint32Array([
-            0xBBC90F88, 0xBC96C9B6, 0xBCFB49BA, 0xBD2FE007, 0xBD621469, 0xBD8A200A, 0xBDA3308C, 0xBDBC3AC3,
-            0xBDD53DB9, 0xBDEE3876, 0xBE039502, 0xBE1008B7, 0xBE1C76DE, 0xBE28DEFC, 0xBE354098, 0xBE419B37,
-            0xBE4DEE60, 0xBE5A3997, 0xBE667C66, 0xBE72B651, 0xBE7EE6E1, 0xBE8586CE, 0xBE8B9507, 0xBE919DDD,
-            0xBE97A117, 0xBE9D9E78, 0xBEA395C5, 0xBEA986C4, 0xBEAF713A, 0xBEB554EC, 0xBEBB31A0, 0xBEC1071E,
-            0xBEC6D529, 0xBECC9B8B, 0xBED25A09, 0xBED8106B, 0xBEDDBE79, 0xBEE363FA, 0xBEE900B7, 0xBEEE9479,
-            0xBEF41F07, 0xBEF9A02D, 0xBEFF17B2, 0xBF0242B1, 0xBF04F484, 0xBF07A136, 0xBF0A48AD, 0xBF0CEAD0,
-            0xBF0F8784, 0xBF121EB0, 0xBF14B039, 0xBF173C07, 0xBF19C200, 0xBF1C420C, 0xBF1EBC12, 0xBF212FF9,
-            0xBF239DA9, 0xBF26050A, 0xBF286605, 0xBF2AC082, 0xBF2D1469, 0xBF2F61A5, 0xBF31A81D, 0xBF33E7BC,
-        ])
-    ],
-    list3Int: new Uint32Array([
-        0x3A3504F0, 0x3B0183B8, 0x3B70C538, 0x3BBB9268, 0x3C04A809, 0x3C308200, 0x3C61284C, 0x3C8B3F17,
-        0x3CA83992, 0x3CC77FBD, 0x3CE91110, 0x3D0677CD, 0x3D198FC4, 0x3D2DD35C, 0x3D434643, 0x3D59ECC1,
-        0x3D71CBA8, 0x3D85741E, 0x3D92A413, 0x3DA078B4, 0x3DAEF522, 0x3DBE1C9E, 0x3DCDF27B, 0x3DDE7A1D,
-        0x3DEFB6ED, 0x3E00D62B, 0x3E0A2EDA, 0x3E13E72A, 0x3E1E00B1, 0x3E287CF2, 0x3E335D55, 0x3E3EA321,
-        0x3E4A4F75, 0x3E56633F, 0x3E62DF37, 0x3E6FC3D1, 0x3E7D1138, 0x3E8563A2, 0x3E8C72B7, 0x3E93B561,
-        0x3E9B2AEF, 0x3EA2D26F, 0x3EAAAAAB, 0x3EB2B222, 0x3EBAE706, 0x3EC34737, 0x3ECBD03D, 0x3ED47F46,
-        0x3EDD5128, 0x3EE6425C, 0x3EEF4EFF, 0x3EF872D7, 0x3F00D4A9, 0x3F0576CA, 0x3F0A1D3B, 0x3F0EC548,
-        0x3F136C25, 0x3F180EF2, 0x3F1CAAC2, 0x3F213CA2, 0x3F25C1A5, 0x3F2A36E7, 0x3F2E9998, 0x3F32E705,
-        //
-        0xBF371C9E, 0xBF3B37FE, 0xBF3F36F2, 0xBF431780, 0xBF46D7E6, 0xBF4A76A4, 0xBF4DF27C, 0xBF514A6F,
-        0xBF547DC5, 0xBF578C03, 0xBF5A74EE, 0xBF5D3887, 0xBF5FD707, 0xBF6250DA, 0xBF64A699, 0xBF66D908,
-        0xBF68E90E, 0xBF6AD7B1, 0xBF6CA611, 0xBF6E5562, 0xBF6FE6E7, 0xBF715BEF, 0xBF72B5D1, 0xBF73F5E6,
-        0xBF751D89, 0xBF762E13, 0xBF7728D7, 0xBF780F20, 0xBF78E234, 0xBF79A34C, 0xBF7A5397, 0xBF7AF439,
-        0xBF7B8648, 0xBF7C0ACE, 0xBF7C82C8, 0xBF7CEF26, 0xBF7D50CB, 0xBF7DA88E, 0xBF7DF737, 0xBF7E3D86,
-        0xBF7E7C2A, 0xBF7EB3CC, 0xBF7EE507, 0xBF7F106C, 0xBF7F3683, 0xBF7F57CA, 0xBF7F74B6, 0xBF7F8DB6,
-        0xBF7FA32E, 0xBF7FB57B, 0xBF7FC4F6, 0xBF7FD1ED, 0xBF7FDCAD, 0xBF7FE579, 0xBF7FEC90, 0xBF7FF22E,
-        0xBF7FF688, 0xBF7FF9D0, 0xBF7FFC32, 0xBF7FFDDA, 0xBF7FFEED, 0xBF7FFF8F, 0xBF7FFFDF, 0xBF7FFFFC,
-    ]),
-};
-class HCABitReader {
-    constructor(size, data) {
-        this._bit = 0;
-        this.check = this.CheckBit;
-        this.read = this.GetBit;
-        this.seek = this.AddBit;
-        this._data = data;
-        this._size = size * 8 - 16;
-    }
-    CheckBit(bitSize) {
-        let v = 0;
-        if (this._bit + bitSize <= this._size) {
-            let data = this._data.subarray(this._bit >> 3);
-            v = data[0];
-            v = (v << 8) | data[1];
-            v = (v << 8) | data[2];
-            v &= HCABitReader.mask[this._bit & 7];
-            v >>= 24 - (this._bit & 7) - bitSize;
+class HCAMdct {
+    constructor(mdctBits, window, scale = 1) {
+        HCAMdct.SetTables(mdctBits);
+        this.MdctBits = mdctBits;
+        this.MdctSize = 1 << mdctBits;
+        this.Scale = scale;
+        if (window.length < this.MdctSize) {
+            throw new Error("Window must be as long as the MDCT size.");
         }
-        return v;
+        this._mdctPrevious = new Float64Array(this.MdctSize);
+        this._imdctPrevious = new Float64Array(this.MdctSize);
+        this._scratchMdct = new Float64Array(this.MdctSize);
+        this._scratchDct = new Float64Array(this.MdctSize);
+        this._imdctWindow = window;
     }
-    GetBit(bitSize) {
-        let v = this.CheckBit(bitSize);
-        this._bit += bitSize;
-        return v;
+    static SetTables(maxBits) {
+        if (maxBits > this._tableBits) {
+            for (let i = this._tableBits + 1; i <= maxBits; i++) {
+                let out = this.GenerateTrigTables(i);
+                this.SinTables.push(out.sin);
+                this.CosTables.push(out.cos);
+                this.ShuffleTables.push(this.GenerateShuffleTable(i));
+            }
+            this._tableBits = maxBits;
+        }
     }
-    AddBit(bitSize) {
-        this._bit += bitSize;
+    RunMdct(input, output) {
+        if (input.length < this.MdctSize) {
+            throw new Error("Input must be as long as the MDCT size.");
+        }
+        if (output.length < this.MdctSize) {
+            throw new Error("Output must be as long as the MDCT size.");
+        }
+        let size = this.MdctSize;
+        let half = (size >> 1);
+        let dctIn = this._scratchMdct;
+        for (let i = 0; i < half; i++) {
+            let a = this._imdctWindow[half - i - 1] * -input[half + i];
+            let b = this._imdctWindow[half + i] * input[half - i - 1];
+            let c = this._imdctWindow[i] * this._mdctPrevious[i];
+            let d = this._imdctWindow[size - i - 1] * this._mdctPrevious[size - i - 1];
+            dctIn[i] = a - b;
+            dctIn[half + i] = c - d;
+        }
+        this.Dct4(dctIn, output);
+        this._mdctPrevious.set(input, input.length);
+    }
+    RunImdct(input, output) {
+        if (input.length < this.MdctSize) {
+            throw new Error("Input must be as long as the MDCT size.");
+        }
+        if (output.length < this.MdctSize) {
+            throw new Error("Output must be as long as the MDCT size.");
+        }
+        let size = this.MdctSize;
+        let half = (size >> 1);
+        let dctOut = this._scratchMdct;
+        this.Dct4(input, dctOut);
+        for (let i = 0; i < half; i++) {
+            output[i] = this._imdctWindow[i] * dctOut[i + half] + this._imdctPrevious[i];
+            output[i + half] = this._imdctWindow[i + half] * -dctOut[size - 1 - i] - this._imdctPrevious[i + half];
+            this._imdctPrevious[i] = this._imdctWindow[size - 1 - i] * -dctOut[half - i - 1];
+            this._imdctPrevious[i + half] = this._imdctWindow[half - i - 1] * dctOut[i];
+        }
+    }
+    /// <summary>
+    /// Does a Type-4 DCT.
+    /// </summary>
+    /// <param name="input">The input array containing the time or frequency-domain samples</param>
+    /// <param name="output">The output array that will contain the transformed time or frequency-domain samples</param>
+    Dct4(input, output) {
+        let shuffleTable = HCAMdct.ShuffleTables[this.MdctBits];
+        let sinTable = HCAMdct.SinTables[this.MdctBits];
+        let cosTable = HCAMdct.CosTables[this.MdctBits];
+        let dctTemp = this._scratchDct;
+        let size = this.MdctSize;
+        let lastIndex = size - 1;
+        let halfSize = (size >> 1);
+        for (let i = 0; i < halfSize; i++) {
+            let i2 = i * 2;
+            let a = input[i2];
+            let b = input[lastIndex - i2];
+            let sin = sinTable[i];
+            let cos = cosTable[i];
+            dctTemp[i2] = a * cos + b * sin;
+            dctTemp[i2 + 1] = a * sin - b * cos;
+        }
+        let stageCount = this.MdctBits - 1;
+        for (let stage = 0; stage < stageCount; stage++) {
+            let blockCount = 1 << stage;
+            let blockSizeBits = stageCount - stage;
+            let blockHalfSizeBits = blockSizeBits - 1;
+            let blockSize = 1 << blockSizeBits;
+            let blockHalfSize = 1 << blockHalfSizeBits;
+            sinTable = HCAMdct.SinTables[blockHalfSizeBits];
+            cosTable = HCAMdct.CosTables[blockHalfSizeBits];
+            for (let block = 0; block < blockCount; block++) {
+                for (let i = 0; i < blockHalfSize; i++) {
+                    let frontPos = (block * blockSize + i) * 2;
+                    let backPos = frontPos + blockSize;
+                    let a = dctTemp[frontPos] - dctTemp[backPos];
+                    let b = dctTemp[frontPos + 1] - dctTemp[backPos + 1];
+                    let sin = sinTable[i];
+                    let cos = cosTable[i];
+                    dctTemp[frontPos] += dctTemp[backPos];
+                    dctTemp[frontPos + 1] += dctTemp[backPos + 1];
+                    dctTemp[backPos] = a * cos + b * sin;
+                    dctTemp[backPos + 1] = a * sin - b * cos;
+                }
+            }
+        }
+        for (let i = 0; i < this.MdctSize; i++) {
+            output[i] = dctTemp[shuffleTable[i]] * this.Scale;
+        }
+    }
+    static GenerateTrigTables(sizeBits) {
+        let size = 1 << sizeBits;
+        let out = {
+            sin: new Float64Array(size),
+            cos: new Float64Array(size)
+        };
+        for (let i = 0; i < size; i++) {
+            let value = Math.PI * (4 * i + 1) / (4 * size);
+            out.sin[i] = Math.sin(value);
+            out.cos[i] = Math.cos(value);
+        }
+        return out;
+    }
+    static GenerateShuffleTable(sizeBits) {
+        let size = 1 << sizeBits;
+        var table = new Int32Array(size);
+        for (let i = 0; i < size; i++) {
+            table[i] = HCAUtilFunc.SignedBitReverse32Trunc(i ^ (i >> 1), sizeBits);
+        }
+        return table;
+    }
+    // ReSharper disable once UnusedMember.Local
+    /// <summary>
+    /// Does a Type-4 DCT. Intended for reference.
+    /// </summary>
+    /// <param name="input">The input array containing the time or frequency-domain samples</param>
+    /// <param name="output">The output array that will contain the transformed time or frequency-domain samples</param>
+    Dct4Slow(input, output) {
+        for (let k = 0; k < this.MdctSize; k++) {
+            let sample = 0;
+            for (let n = 0; n < this.MdctSize; n++) {
+                let angle = Math.PI / this.MdctSize * (k + 0.5) * (n + 0.5);
+                sample += Math.cos(angle) * input[n];
+            }
+            output[k] = sample * this.Scale;
+        }
     }
 }
-HCABitReader.mask = [0xFFFFFF, 0x7FFFFF, 0x3FFFFF, 0x1FFFFF, 0x0FFFFF, 0x07FFFF, 0x03FFFF, 0x01FFFF];
+HCAMdct._tableBits = -1;
+HCAMdct.SinTables = [];
+HCAMdct.CosTables = [];
+HCAMdct.ShuffleTables = [];
+class HCATables {
+    static isLittleEndian() {
+        let test = new Float64Array([1.0]);
+        let dv = new DataView(test.buffer);
+        if (dv.getUint32(0) != 0)
+            return false;
+        return true;
+    }
+    static adaptEndianness6432(a) {
+        if (a.byteLength % 8 != 0)
+            throw new Error();
+        if (!this.isLittleEndian()) {
+            for (let i = 0; i < a.length; i += 2) {
+                let temp = a[i];
+                a[i] = a[i + 1];
+                a[i + 1] = temp;
+            }
+        }
+        return a;
+    }
+}
+_b = HCATables;
+HCATables.QuantizeSpectrumBits = [
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x02, 0x02, 0x02, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x03, 0x03, 0x02, 0x03, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, 0x04, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x04, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x04, 0x04, 0x04, 0x03, 0x03, 0x03, 0x03, 0x03, 0x04, 0x04, 0x04, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x04, 0x04, 0x04, 0x04, 0x04, 0x03, 0x03, 0x03, 0x04, 0x04, 0x04, 0x04, 0x04, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x03, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04
+    ]),
+];
+HCATables.QuantizeSpectrumValue = [
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x02, 0x00, 0x01, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x05, 0x03, 0x00, 0x02, 0x04, 0x06, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, 0x0F, 0x06, 0x04, 0x02, 0x00, 0x01, 0x03, 0x05, 0x0E, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x0F, 0x0D, 0x0B, 0x04, 0x02, 0x00, 0x01, 0x03, 0x0A, 0x0C, 0x0E, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x0F, 0x0D, 0x0B, 0x09, 0x07, 0x02, 0x00, 0x01, 0x06, 0x08, 0x0A, 0x0C, 0x0E, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x0F, 0x0D, 0x0B, 0x09, 0x07, 0x05, 0x03, 0x00, 0x02, 0x04, 0x06, 0x08, 0x0A, 0x0C, 0x0E
+    ]),
+];
+HCATables.QuantizedSpectrumBits = [
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x01, 0x01, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x02, 0x02, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x04, 0x04
+    ]),
+    new Uint8Array([
+        0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04
+    ]),
+    new Uint8Array([
+        0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04
+    ]),
+    new Uint8Array([
+        0x03, 0x03, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04
+    ]),
+];
+HCATables.QuantizedSpectrumMaxBits = new Uint8Array([
+    0x00, 0x02, 0x03, 0x03, 0x04, 0x04, 0x04, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C
+]);
+HCATables.QuantizedSpectrumValue = [
+    new Int8Array([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Int8Array([
+        0x00, 0x00, 0x01, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Int8Array([
+        0x00, 0x00, 0x01, 0x01, 0xFF, 0xFF, 0x02, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Int8Array([
+        0x00, 0x00, 0x01, 0xFF, 0x02, 0xFE, 0x03, 0xFD, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Int8Array([
+        0x00, 0x00, 0x01, 0x01, 0xFF, 0xFF, 0x02, 0x02, 0xFE, 0xFE, 0x03, 0x03, 0xFD, 0xFD, 0x04, 0xFC
+    ]),
+    new Int8Array([
+        0x00, 0x00, 0x01, 0x01, 0xFF, 0xFF, 0x02, 0x02, 0xFE, 0xFE, 0x03, 0xFD, 0x04, 0xFC, 0x05, 0xFB
+    ]),
+    new Int8Array([
+        0x00, 0x00, 0x01, 0x01, 0xFF, 0xFF, 0x02, 0xFE, 0x03, 0xFD, 0x04, 0xFC, 0x05, 0xFB, 0x06, 0xFA
+    ]),
+    new Int8Array([
+        0x00, 0x00, 0x01, 0xFF, 0x02, 0xFE, 0x03, 0xFD, 0x04, 0xFC, 0x05, 0xFB, 0x06, 0xFA, 0x07, 0xF9
+    ]),
+];
+HCATables.ScaleToResolutionCurve = new Uint8Array([
+    0x0F, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0C, 0x0C, 0x0C,
+    0x0C, 0x0C, 0x0C, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A,
+    0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x07, 0x06, 0x06, 0x05,
+    0x04, 0x04, 0x04, 0x03, 0x03, 0x03, 0x02, 0x02, 0x02, 0x02, 0x01
+]);
+HCATables.AthCurve = new Uint8Array([
+    0x78, 0x5F, 0x56, 0x51, 0x4E, 0x4C, 0x4B, 0x49, 0x48, 0x48, 0x47, 0x46, 0x46, 0x45, 0x45, 0x45,
+    0x44, 0x44, 0x44, 0x44, 0x43, 0x43, 0x43, 0x43, 0x43, 0x43, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+    0x42, 0x42, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x40, 0x40, 0x40, 0x40,
+    0x40, 0x40, 0x40, 0x40, 0x40, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F,
+    0x3F, 0x3F, 0x3F, 0x3E, 0x3E, 0x3E, 0x3E, 0x3E, 0x3E, 0x3D, 0x3D, 0x3D, 0x3D, 0x3D, 0x3D, 0x3D,
+    0x3C, 0x3C, 0x3C, 0x3C, 0x3C, 0x3C, 0x3C, 0x3C, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B,
+    0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B,
+    0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3B, 0x3C, 0x3C, 0x3C, 0x3C, 0x3C, 0x3C, 0x3C, 0x3C,
+    0x3D, 0x3D, 0x3D, 0x3D, 0x3D, 0x3D, 0x3D, 0x3D, 0x3E, 0x3E, 0x3E, 0x3E, 0x3E, 0x3E, 0x3E, 0x3F,
+    0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F,
+    0x3F, 0x3F, 0x3F, 0x3F, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40,
+    0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+    0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+    0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x43, 0x43, 0x43,
+    0x43, 0x43, 0x43, 0x43, 0x43, 0x43, 0x43, 0x43, 0x43, 0x43, 0x43, 0x43, 0x43, 0x43, 0x44, 0x44,
+    0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x45, 0x45, 0x45, 0x45,
+    0x45, 0x45, 0x45, 0x45, 0x45, 0x45, 0x45, 0x45, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46, 0x46,
+    0x46, 0x46, 0x47, 0x47, 0x47, 0x47, 0x47, 0x47, 0x47, 0x47, 0x47, 0x47, 0x48, 0x48, 0x48, 0x48,
+    0x48, 0x48, 0x48, 0x48, 0x49, 0x49, 0x49, 0x49, 0x49, 0x49, 0x49, 0x49, 0x4A, 0x4A, 0x4A, 0x4A,
+    0x4A, 0x4A, 0x4A, 0x4A, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4B, 0x4C, 0x4C, 0x4C, 0x4C, 0x4C,
+    0x4C, 0x4D, 0x4D, 0x4D, 0x4D, 0x4D, 0x4D, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4E, 0x4F, 0x4F, 0x4F,
+    0x4F, 0x4F, 0x4F, 0x50, 0x50, 0x50, 0x50, 0x50, 0x51, 0x51, 0x51, 0x51, 0x51, 0x52, 0x52, 0x52,
+    0x52, 0x52, 0x53, 0x53, 0x53, 0x53, 0x54, 0x54, 0x54, 0x54, 0x54, 0x55, 0x55, 0x55, 0x55, 0x56,
+    0x56, 0x56, 0x56, 0x57, 0x57, 0x57, 0x57, 0x57, 0x58, 0x58, 0x58, 0x59, 0x59, 0x59, 0x59, 0x5A,
+    0x5A, 0x5A, 0x5A, 0x5B, 0x5B, 0x5B, 0x5B, 0x5C, 0x5C, 0x5C, 0x5D, 0x5D, 0x5D, 0x5D, 0x5E, 0x5E,
+    0x5E, 0x5F, 0x5F, 0x5F, 0x60, 0x60, 0x60, 0x61, 0x61, 0x61, 0x61, 0x62, 0x62, 0x62, 0x63, 0x63,
+    0x63, 0x64, 0x64, 0x64, 0x65, 0x65, 0x66, 0x66, 0x66, 0x67, 0x67, 0x67, 0x68, 0x68, 0x68, 0x69,
+    0x69, 0x6A, 0x6A, 0x6A, 0x6B, 0x6B, 0x6B, 0x6C, 0x6C, 0x6D, 0x6D, 0x6D, 0x6E, 0x6E, 0x6F, 0x6F,
+    0x70, 0x70, 0x70, 0x71, 0x71, 0x72, 0x72, 0x73, 0x73, 0x73, 0x74, 0x74, 0x75, 0x75, 0x76, 0x76,
+    0x77, 0x77, 0x78, 0x78, 0x78, 0x79, 0x79, 0x7A, 0x7A, 0x7B, 0x7B, 0x7C, 0x7C, 0x7D, 0x7D, 0x7E,
+    0x7E, 0x7F, 0x7F, 0x80, 0x80, 0x81, 0x81, 0x82, 0x83, 0x83, 0x84, 0x84, 0x85, 0x85, 0x86, 0x86,
+    0x87, 0x88, 0x88, 0x89, 0x89, 0x8A, 0x8A, 0x8B, 0x8C, 0x8C, 0x8D, 0x8D, 0x8E, 0x8F, 0x8F, 0x90,
+    0x90, 0x91, 0x92, 0x92, 0x93, 0x94, 0x94, 0x95, 0x95, 0x96, 0x97, 0x97, 0x98, 0x99, 0x99, 0x9A,
+    0x9B, 0x9B, 0x9C, 0x9D, 0x9D, 0x9E, 0x9F, 0xA0, 0xA0, 0xA1, 0xA2, 0xA2, 0xA3, 0xA4, 0xA5, 0xA5,
+    0xA6, 0xA7, 0xA7, 0xA8, 0xA9, 0xAA, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAE, 0xAF, 0xB0, 0xB1, 0xB1,
+    0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF,
+    0xC0, 0xC1, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD,
+    0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD,
+    0xDE, 0xDF, 0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xED, 0xEE,
+    0xEF, 0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD
+]);
+HCATables.MdctWindow = new Float64Array(_b.adaptEndianness6432(new Uint32Array([
+    0x00000000, 0x3F46A09E, 0x00000000, 0x3F603077, 0x00000000, 0x3F6E18A7, 0x00000000, 0x3F77724D,
+    0x20000000, 0x3F809501, 0x00000000, 0x3F861040, 0x80000000, 0x3F8C2509, 0xE0000000, 0x3F9167E2,
+    0x40000000, 0x3F950732, 0xA0000000, 0x3F98EFF7, 0x00000000, 0x3F9D2222, 0xA0000000, 0x3FA0CEF9,
+    0x80000000, 0x3FA331F8, 0x80000000, 0x3FA5BA6B, 0x60000000, 0x3FA868C8, 0x20000000, 0x3FAB3D98,
+    0x00000000, 0x3FAE3975, 0xC0000000, 0x3FB0AE83, 0x60000000, 0x3FB25482, 0x80000000, 0x3FB40F16,
+    0x40000000, 0x3FB5DEA4, 0xC0000000, 0x3FB7C393, 0x60000000, 0x3FB9BE4F, 0xA0000000, 0x3FBBCF43,
+    0xA0000000, 0x3FBDF6DD, 0x60000000, 0x3FC01AC5, 0x40000000, 0x3FC145DB, 0x40000000, 0x3FC27CE5,
+    0x20000000, 0x3FC3C016, 0x40000000, 0x3FC50F9E, 0xA0000000, 0x3FC66BAA, 0x20000000, 0x3FC7D464,
+    0xA0000000, 0x3FC949EE, 0xE0000000, 0x3FCACC67, 0xE0000000, 0x3FCC5BE6, 0x20000000, 0x3FCDF87A,
+    0x00000000, 0x3FCFA227, 0x40000000, 0x3FD0AC74, 0xE0000000, 0x3FD18E56, 0x20000000, 0x3FD276AC,
+    0xE0000000, 0x3FD3655D, 0xE0000000, 0x3FD45A4D, 0x60000000, 0x3FD55555, 0x40000000, 0x3FD65644,
+    0xC0000000, 0x3FD75CE0, 0xE0000000, 0x3FD868E6, 0xA0000000, 0x3FD97A07, 0xC0000000, 0x3FDA8FE8,
+    0x00000000, 0x3FDBAA25, 0x80000000, 0x3FDCC84B, 0xE0000000, 0x3FDDE9DF, 0xE0000000, 0x3FDF0E5A,
+    0x20000000, 0x3FE01A95, 0x40000000, 0x3FE0AED9, 0x60000000, 0x3FE143A7, 0x00000000, 0x3FE1D8A9,
+    0xA0000000, 0x3FE26D84, 0x40000000, 0x3FE301DE, 0x40000000, 0x3FE39558, 0x40000000, 0x3FE42794,
+    0xA0000000, 0x3FE4B834, 0xE0000000, 0x3FE546DC, 0x00000000, 0x3FE5D333, 0xA0000000, 0x3FE65CE0,
+    0xC0000000, 0x3FE6E393, 0xC0000000, 0x3FE766FF, 0x40000000, 0x3FE7E6DE, 0x00000000, 0x3FE862F0,
+    0xC0000000, 0x3FE8DAFC, 0x80000000, 0x3FE94ED4, 0x80000000, 0x3FE9BE4F, 0xE0000000, 0x3FEA294D,
+    0xA0000000, 0x3FEA8FB8, 0x60000000, 0x3FEAF180, 0xC0000000, 0x3FEB4E9D, 0xE0000000, 0x3FEBA710,
+    0xE0000000, 0x3FEBFAE0, 0x40000000, 0x3FEC4A1B, 0x20000000, 0x3FEC94D3, 0x00000000, 0x3FECDB21,
+    0xC0000000, 0x3FED1D21, 0x20000000, 0x3FED5AF6, 0x20000000, 0x3FED94C2, 0x40000000, 0x3FEDCAAC,
+    0xE0000000, 0x3FEDFCDC, 0xE0000000, 0x3FEE2B7D, 0x20000000, 0x3FEE56BA, 0xC0000000, 0x3FEE7EBC,
+    0x20000000, 0x3FEEA3B1, 0x60000000, 0x3FEEC5C2, 0xE0000000, 0x3FEEE51A, 0x00000000, 0x3FEF01E4,
+    0x80000000, 0x3FEF1C46, 0x80000000, 0x3FEF3469, 0xE0000000, 0x3FEF4A72, 0x20000000, 0x3FEF5E87,
+    0x00000000, 0x3FEF70C9, 0xC0000000, 0x3FEF8159, 0x00000000, 0x3FEF9059, 0xC0000000, 0x3FEF9DE4,
+    0x60000000, 0x3FEFAA19, 0xC0000000, 0x3FEFB511, 0xE0000000, 0x3FEFBEE6, 0xC0000000, 0x3FEFC7B0,
+    0x40000000, 0x3FEFCF85, 0x80000000, 0x3FEFD679, 0xE0000000, 0x3FEFDCA0, 0x80000000, 0x3FEFE20D,
+    0x60000000, 0x3FEFE6D0, 0x40000000, 0x3FEFEAF9, 0xC0000000, 0x3FEFEE96, 0xC0000000, 0x3FEFF1B6,
+    0xC0000000, 0x3FEFF465, 0x60000000, 0x3FEFF6AF, 0xC0000000, 0x3FEFF89E, 0xA0000000, 0x3FEFFA3D,
+    0xA0000000, 0x3FEFFB95, 0x20000000, 0x3FEFFCAF, 0x00000000, 0x3FEFFD92, 0xC0000000, 0x3FEFFE45,
+    0x00000000, 0x3FEFFED1, 0x00000000, 0x3FEFFF3A, 0x40000000, 0x3FEFFF86, 0x40000000, 0x3FEFFFBB,
+    0xA0000000, 0x3FEFFFDD, 0xE0000000, 0x3FEFFFF1, 0xE0000000, 0x3FEFFFFB, 0x80000000, 0x3FEFFFFF
+])).buffer);
+HCATables.DefaultChannelMapping = new Uint8Array([
+    0x00, 0x01, 0x00, 0x04, 0x00, 0x01, 0x03, 0x07, 0x03
+]);
+HCATables.ValidChannelMappings = [
+    new Uint8Array([
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01
+    ]),
+    new Uint8Array([
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00
+    ]),
+];
+HCATables.DequantizerScalingTable = new Float64Array(_b.adaptEndianness6432(new Uint32Array([
+    0xCA5D9201, 0x3E8551A4, 0x2E57D139, 0x3E8C67F1, 0xA93E2F4A, 0x3E92ECAF, 0xB0CDC5D5, 0x3E993737,
+    0x2B7247ED, 0x3EA0CC92, 0x82552217, 0x3EA66238, 0xF301B44F, 0x3EADD321, 0x4C123416, 0x3EB3DEA6,
+    0x1330B349, 0x3EBA799E, 0xEB6FCB6C, 0x3EC1A35B, 0x4FDE5D33, 0x3EC78069, 0x5B6E452F, 0x3ECF5076,
+    0x99FDDD03, 0x3ED4DCB2, 0x904BC1C3, 0x3EDBCC1E, 0xE1F56378, 0x3EE284DF, 0x422AA0CF, 0x3EE8ACE5,
+    0x29DDF6D6, 0x3EF0706B, 0x15AD213E, 0x3EF5E76F, 0x080D89E3, 0x3EFD2F87, 0x373AA9C2, 0x3F0371A7,
+    0x19E32318, 0x3F09E863, 0xAEA92DD8, 0x3F11429A, 0xF951947B, 0x3F16FF7D, 0xA2A490CD, 0x3F1EA4AF,
+    0xED1D0050, 0x3F246A41, 0xB84F15F0, 0x3F2B33A2, 0x917DDC90, 0x3F321F49, 0x994CCE0A, 0x3F382589,
+    0xA9FB332F, 0x3F40163D, 0x36B527D3, 0x3F456F47, 0x9406E7AC, 0x3F4C8F6D, 0x0A31B70F, 0x3F5306FE,
+    0xCBC85207, 0x3F595A44, 0x32D3D19D, 0x3F60E3EC, 0xD44CA96C, 0x3F668155, 0x337B9B56, 0x3F6DFC97,
+    0x04AC8016, 0x3F73FA45, 0x5579FDB8, 0x3F7A9E6B, 0x84045CCF, 0x3F81BBE0, 0x73EB0181, 0x3F87A114,
+    0xAD9CBE0C, 0x3F8F7BFD, 0x769D2CA2, 0x3F94F9B2, 0x5BD71E03, 0x3F9BF2C2, 0xF51FDEDE, 0x3FA29E9D,
+    0x16B54487, 0x3FA8CF32, 0x18759BC5, 0x3FB08745, 0xB976DC05, 0x3FB605E1, 0xDCFBA483, 0x3FBD5818,
+    0x6D05D863, 0x3FC38CAE, 0x7B5DE561, 0x3FCA0C66, 0xC8A58E4F, 0x3FD15A98, 0xE8EC5F71, 0x3FD71F75,
+    0x2D8E67ED, 0x3FDECF48, 0xB5C13CCE, 0x3FE486A2, 0x8DE55938, 0x3FEB5972, 0x6E756237, 0x3FF2387A,
+    0x4623C7AC, 0x3FF8471A, 0x3E778060, 0x40002C9A, 0xD497C7FD, 0x40058D12, 0xDCEF9068, 0x400CB720,
+    0xFC4CD831, 0x40132170, 0x9FDE4E50, 0x40197D82, 0xAFFED31B, 0x4020FB66, 0x667F3BCD, 0x4026A09E
+])).buffer);
+HCATables.QuantizerStepSize = new Float64Array(_b.adaptEndianness6432(new Uint32Array([
+    0x00000000, 0x00000000, 0x55555555, 0x3FE55555, 0x9999999A, 0x3FD99999, 0x92492492, 0x3FD24924,
+    0x1C71C71C, 0x3FCC71C7, 0x745D1746, 0x3FC745D1, 0x13B13B14, 0x3FC3B13B, 0x11111111, 0x3FC11111,
+    0x08421084, 0x3FB08421, 0x10410410, 0x3FA04104, 0x81020408, 0x3F902040, 0x10101010, 0x3F801010,
+    0x02010080, 0x3F700804, 0x00401004, 0x3F600401, 0x40080100, 0x3F500200, 0x10010010, 0x3F400100
+])).buffer);
+HCATables.QuantizerDeadZone = new Float64Array(_b.adaptEndianness6432(new Uint32Array([
+    0xFFFFFFFF, 0xFFFFFFFF, 0x55555553, 0x3FD55555, 0x99999997, 0x3FC99999, 0x9249248E, 0x3FC24924,
+    0x1C71C717, 0x3FBC71C7, 0x745D1740, 0x3FB745D1, 0x13B13B0D, 0x3FB3B13B, 0x11111109, 0x3FB11111,
+    0x08421074, 0x3FA08421, 0x104103F0, 0x3F904104, 0x810203C8, 0x3F802040, 0x10100F90, 0x3F701010,
+    0x0200FF80, 0x3F600804, 0x00400E04, 0x3F500401, 0x4007FD00, 0x3F400200, 0x1000F810, 0x3F300100
+])).buffer);
+HCATables.QuantizerScalingTable = new Float64Array(_b.adaptEndianness6432(new Uint32Array([
+    0x543E1A21, 0x41580427, 0x88628CE2, 0x4152063B, 0x298DB677, 0x414B0E07, 0x6061893A, 0x41444E08,
+    0xFBC74C96, 0x413E7A51, 0x3C651A3D, 0x4136DFB2, 0xC06C31D6, 0x41312ABD, 0x82A3F0A0, 0x4129C491,
+    0x5F929FFC, 0x412356C5, 0x4A07898B, 0x411D072D, 0x8A5946C2, 0x4115C926, 0xD315857D, 0x411059B0,
+    0xD98A66A6, 0x41088AC7, 0x65E27CE7, 0x41026B45, 0x30A10656, 0x40FBA5B0, 0xD5362A32, 0x40F4BFDA,
+    0x376BBAA6, 0x40EF252B, 0x564267D4, 0x40E75FEB, 0x388C8DF2, 0x40E18AF9, 0xB23E2568, 0x40DA5503,
+    0xC313A8ED, 0x40D3C32D, 0x03DB3293, 0x40CDA9E6, 0x34CCC328, 0x40C64346, 0x6CF98916, 0x40C0B558,
+    0x0B91FFCF, 0x40B9145B, 0xA6E40313, 0x40B2D285, 0x5FFFD084, 0x40AC40AB, 0x569D4F89, 0x40A5342B,
+    0x2B8F71FE, 0x409FD3C2, 0x36CF4E6A, 0x4097E2F3, 0x22FCD922, 0x4091ED50, 0x995AD3B6, 0x408AE89F,
+    0xD950A89D, 0x408431F5, 0xE78B3FFF, 0x407E502E, 0x750BDAC6, 0x4076C012, 0xD0125B56, 0x40711301,
+    0x70CA07C1, 0x4069A0F1, 0xB2641705, 0x40633C08, 0x555DC401, 0x405CDF0B, 0xDD48542F, 0x4055AB07,
+    0xE86E7F89, 0x40504315, 0x9B4492F2, 0x404868D9, 0x4FB2A643, 0x404251CE, 0xF2FB5E4C, 0x403B7F76,
+    0xF0D7D3E3, 0x4034A32A, 0xEE615A2D, 0x402EFA1B, 0x48A58178, 0x40273F9A, 0x3C7D517D, 0x402172B8,
+    0xEC4A2D37, 0x401A309B, 0x34E59FFA, 0x4013A7DB, 0x16C9839B, 0x400D80E3, 0xB03A5587, 0x4006247E,
+    0xCAC6F385, 0x40009E3E, 0x99157739, 0x3FF8F1AE, 0xD0DAD991, 0x3FF2B87F, 0xDD85529E, 0x3FEC199B,
+    0xA2CF6642, 0x3FE516DA, 0x819E90DA, 0x3FDFA7C1, 0x0130C133, 0x3FD7C1ED, 0x3168B9AB, 0x3FD1D487,
+    0xBFD3F37A, 0x3FCAC36B, 0x21F72E2A, 0x3FC4160A, 0x14F5A129, 0x3FBE2646, 0x667F3BCC, 0x3FB6A09E
+])).buffer);
+HCATables.QuantizerInverseStepSize = new Float64Array(_b.adaptEndianness6432(new Uint32Array([
+    0x00000000, 0x3FE00000, 0x00000000, 0x3FF80000, 0x00000000, 0x40040000, 0x00000000, 0x400C0000,
+    0x00000000, 0x40120000, 0x00000000, 0x40160000, 0x00000000, 0x401A0000, 0x00000000, 0x401E0000,
+    0x00000000, 0x402F0000, 0x00000000, 0x403F8000, 0x00000000, 0x404FC000, 0x00000000, 0x405FE000,
+    0x00000000, 0x406FF000, 0x00000000, 0x407FF800, 0x00000000, 0x408FFC00, 0x00000000, 0x409FFE00
+])).buffer);
+HCATables.ResolutionMaxValues = new Int32Array([
+    0x00000000, 0x00000001, 0x00000002, 0x00000003, 0x00000004, 0x00000005, 0x00000006, 0x00000007,
+    0x0000000F, 0x0000001F, 0x0000003F, 0x0000007F, 0x000000FF, 0x000001FF, 0x000003FF, 0x000007FF
+]);
+HCATables.IntensityRatioTable = new Float64Array(_b.adaptEndianness6432(new Uint32Array([
+    0x00000000, 0x40000000, 0x6DB6DB6E, 0x3FFDB6DB, 0xDB6DB6DB, 0x3FFB6DB6, 0x49249249, 0x3FF92492,
+    0xB6DB6DB7, 0x3FF6DB6D, 0x24924925, 0x3FF49249, 0x92492492, 0x3FF24924, 0x00000000, 0x3FF00000,
+    0xDB6DB6DB, 0x3FEB6DB6, 0xB6DB6DB7, 0x3FE6DB6D, 0x92492492, 0x3FE24924, 0xDB6DB6DB, 0x3FDB6DB6,
+    0x92492492, 0x3FD24924, 0x92492492, 0x3FC24924, 0x00000000, 0x00000000
+])).buffer);
+HCATables.IntensityRatioBoundsTable = new Float64Array(_b.adaptEndianness6432(new Uint32Array([
+    0xB6DB6DB7, 0x3FFEDB6D, 0x24924925, 0x3FFC9249, 0x92492492, 0x3FFA4924, 0x00000000, 0x3FF80000,
+    0x6DB6DB6E, 0x3FF5B6DB, 0xDB6DB6DB, 0x3FF36DB6, 0x49249249, 0x3FF12492, 0x6DB6DB6E, 0x3FEDB6DB,
+    0x49249249, 0x3FE92492, 0x24924925, 0x3FE49249, 0x00000000, 0x3FE00000, 0xB6DB6DB7, 0x3FD6DB6D,
+    0xDB6DB6DB, 0x3FCB6DB6, 0x92492492, 0x3FB24924
+])).buffer);
+HCATables.ScaleConversionTable = new Float64Array(_b.adaptEndianness6432(new Uint32Array([
+    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x21F72E1D, 0x3E54160A, 0xBFD3F368, 0x3E5AC36B,
+    0x3168B99F, 0x3E61D487, 0x0130C123, 0x3E67C1ED, 0x819E90C4, 0x3E6FA7C1, 0xA2CF6635, 0x3E7516DA,
+    0xDD85528B, 0x3E7C199B, 0xD0DAD985, 0x3E82B87F, 0x99157728, 0x3E88F1AE, 0xCAC6F37A, 0x3E909E3E,
+    0xB03A5578, 0x3E96247E, 0x16C98388, 0x3E9D80E3, 0x34E59FEC, 0x3EA3A7DB, 0xEC4A2D26, 0x3EAA309B,
+    0x3C7D5172, 0x3EB172B8, 0x48A58168, 0x3EB73F9A, 0xEE615A18, 0x3EBEFA1B, 0xF0D7D3D4, 0x3EC4A32A,
+    0xF2FB5E3A, 0x3ECB7F76, 0x4FB2A637, 0x3ED251CE, 0x9B4492E1, 0x3ED868D9, 0xE86E7F7E, 0x3EE04315,
+    0xDD485420, 0x3EE5AB07, 0x555DC3EE, 0x3EECDF0B, 0xB26416F7, 0x3EF33C08, 0x70CA07B0, 0x3EF9A0F1,
+    0xD0125B4A, 0x3F011301, 0x750BDAB6, 0x3F06C012, 0xE78B3FEB, 0x3F0E502E, 0xD950A890, 0x3F1431F5,
+    0x995AD3A4, 0x3F1AE89F, 0x22FCD917, 0x3F21ED50, 0x36CF4E5A, 0x3F27E2F3, 0x2B8F71E7, 0x3F2FD3C2,
+    0x569D4F7B, 0x3F35342B, 0x5FFFD072, 0x3F3C40AB, 0xA6E40306, 0x3F42D285, 0x0B91FFBF, 0x3F49145B,
+    0x6CF9890B, 0x3F50B558, 0x34CCC31A, 0x3F564346, 0x03DB327E, 0x3F5DA9E6, 0xC313A8E0, 0x3F63C32D,
+    0xB23E2557, 0x3F6A5503, 0x388C8DE6, 0x3F718AF9, 0x564267C4, 0x3F775FEB, 0x376BBA92, 0x3F7F252B,
+    0xD5362A24, 0x3F84BFDA, 0x30A10645, 0x3F8BA5B0, 0x65E27CDA, 0x3F926B45, 0xD98A6696, 0x3F988AC7,
+    0xD3158572, 0x3FA059B0, 0x8A5946B4, 0x3FA5C926, 0x4A078978, 0x3FAD072D, 0x5F929FEF, 0x3FB356C5,
+    0x82A3F08E, 0x3FB9C491, 0xC06C31CB, 0x3FC12ABD, 0x3C651A2D, 0x3FC6DFB2, 0xFBC74C82, 0x3FCE7A51,
+    0x6061892C, 0x3FD44E08, 0x298DB665, 0x3FDB0E07, 0x88628CD6, 0x3FE2063B, 0x543E1A11, 0x3FE80427,
+    0x00000000, 0x3FF00000, 0xCA5D920F, 0x3FF551A4, 0x2E57D14C, 0x3FFC67F1, 0xA93E2F57, 0x4002ECAF,
+    0xB0CDC5E6, 0x40093737, 0x2B7247F8, 0x4010CC92, 0x82552226, 0x40166238, 0xF301B463, 0x401DD321,
+    0x4C123424, 0x4023DEA6, 0x1330B35B, 0x402A799E, 0xEB6FCB77, 0x4031A35B, 0x4FDE5D42, 0x40378069,
+    0x5B6E4544, 0x403F5076, 0x99FDDD10, 0x4044DCB2, 0x904BC1D6, 0x404BCC1E, 0xE1F56384, 0x405284DF,
+    0x422AA0E0, 0x4058ACE5, 0x29DDF6E1, 0x4060706B, 0x15AD214D, 0x4065E76F, 0x080D89F8, 0x406D2F87,
+    0x373AA9CF, 0x407371A7, 0x19E32329, 0x4079E863, 0xAEA92DE4, 0x4081429A, 0xF951948A, 0x4086FF7D,
+    0xA2A490E1, 0x408EA4AF, 0xED1D005D, 0x40946A41, 0xB84F1603, 0x409B33A2, 0x917DDC9B, 0x40A21F49,
+    0x994CCE1A, 0x40A82589, 0xA9FB333A, 0x40B0163D, 0x36B527E1, 0x40B56F47, 0x9406E7BF, 0x40BC8F6D,
+    0x0A31B71C, 0x40C306FE, 0xCBC85218, 0x40C95A44, 0x32D3D1A8, 0x40D0E3EC, 0xD44CA97C, 0x40D68155,
+    0x337B9B6A, 0x40DDFC97, 0x04AC8024, 0x40E3FA45, 0x5579FDCA, 0x40EA9E6B, 0x84045CDB, 0x40F1BBE0,
+    0x73EB0191, 0x40F7A114, 0xAD9CBE21, 0x40FF7BFD, 0x769D2CB0, 0x4104F9B2, 0x5BD71E15, 0x410BF2C2,
+    0xF51FDEEA, 0x41129E9D, 0x16B54498, 0x4118CF32, 0x18759BD0, 0x41208745, 0xB976DC14, 0x412605E1,
+    0xDCFBA496, 0x412D5818, 0x6D05D870, 0x41338CAE, 0x7B5DE573, 0x413A0C66, 0xC8A58E5B, 0x41415A98,
+    0xE8EC5F81, 0x41471F75, 0x2D8E6802, 0x414ECF48, 0xB5C13CDC, 0x415486A2, 0x8DE5594A, 0x415B5972,
+    0x6E756243, 0x4162387A, 0x4623C7BC, 0x4168471A, 0x3E77806B, 0x41702C9A, 0xD497C80B, 0x41758D12,
+    0xDCEF907C, 0x417CB720, 0xFC4CD83E, 0x41832170, 0x9FDE4E61, 0x41897D82, 0x00000000, 0x00000000
+])).buffer);
 class HCACrc16 {
     static calc(data, size) {
         if (size > data.byteLength)
-            throw new Error("size > data.byteLength");
+            throw new Error();
         if (size < 0)
-            throw new Error("size < 0");
+            throw new Error();
         let sum = 0;
         for (let i = 0; i < size; i++)
             sum = ((sum << 8) ^ this._v[(sum >> 8) ^ data[i]]) & 0x0000ffff;
         return sum & 0x0000ffff;
     }
-    static verify(data, size, expected = undefined, doNotThrow = false) {
+    static verify(data, size, expected, doNotThrow = false) {
         if (expected == null) {
             expected = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint16(size);
         }
@@ -1288,7 +2065,7 @@ HCACrc16._v = new Uint16Array([
     0x0220, 0x8225, 0x822F, 0x022A, 0x823B, 0x023E, 0x0234, 0x8231, 0x8213, 0x0216, 0x021C, 0x8219, 0x0208, 0x820D, 0x8207, 0x0202
 ]);
 class HCACipher {
-    constructor(key1 = undefined, key2 = undefined) {
+    constructor(key1, key2) {
         this.cipherType = 0;
         this.encrypt = false;
         this.key1buf = new ArrayBuffer(4);
@@ -1478,278 +2255,999 @@ class HCACipher {
 }
 HCACipher.defKey1 = 0x01395C51;
 HCACipher.defKey2 = 0x00000000;
-class HCAInternalState {
-    constructor(hca) {
-        if (hca instanceof HCAInternalState) {
-            let old = hca;
-            this.info = old.info.clone();
-            this.channel = [];
-            old.channel.forEach(c => this.channel.push(c.clone()));
+// convert non-transferable typed array to transferable array buffer
+class HCATransTypedArray {
+    constructor(ta, transferList) {
+        const type = HCATransTypedArray.getType(ta);
+        if (type != null)
+            this.type = type.type;
+        else
+            throw new Error("unexpected type");
+        this.buffer = ta.buffer;
+        this.byteOffset = ta.byteOffset;
+        this.length = ta.length;
+        if (!transferList.find((val) => val === this.buffer))
+            transferList.push(this.buffer);
+    }
+    static convert(arg, transferList) {
+        if (this.getType(arg) != null)
+            return new HCATransTypedArray(arg, transferList);
+        else
+            return arg;
+    }
+    static restore(arg) {
+        const type = this.getType(arg);
+        if (type != null && type.converted)
+            return arg.array;
+        else
+            return arg;
+    }
+    static getType(arg) {
+        if (arg == null || typeof arg !== "object")
+            return undefined;
+        else if (arg instanceof Int8Array)
+            return { converted: false, type: "Int8" };
+        else if (arg instanceof Int16Array)
+            return { converted: false, type: "Int16" };
+        else if (arg instanceof Int32Array)
+            return { converted: false, type: "Int32" };
+        else if (arg instanceof Uint8Array)
+            return { converted: false, type: "Uint8" };
+        else if (arg instanceof Uint16Array)
+            return { converted: false, type: "Uint16" };
+        else if (arg instanceof Uint32Array)
+            return { converted: false, type: "Uint32" };
+        else if (arg instanceof Float32Array)
+            return { converted: false, type: "Float32" };
+        else if (arg instanceof Float64Array)
+            return { converted: false, type: "Float64" };
+        else if (arg.buffer instanceof ArrayBuffer && typeof arg.type === "string")
+            return { converted: true, type: arg.type };
+        else
+            return undefined;
+    }
+    get array() {
+        switch (this.type) {
+            case "Int8": return new Int8Array(this.buffer, this.byteOffset, this.length);
+            case "Int16": return new Int16Array(this.buffer, this.byteOffset, this.length);
+            case "Int32": return new Int32Array(this.buffer, this.byteOffset, this.length);
+            case "Uint8": return new Uint8Array(this.buffer, this.byteOffset, this.length);
+            case "Uint16": return new Uint16Array(this.buffer, this.byteOffset, this.length);
+            case "Uint32": return new Uint32Array(this.buffer, this.byteOffset, this.length);
+            case "Float32": return new Float32Array(this.buffer, this.byteOffset, this.length);
+            case "Float64": return new Float64Array(this.buffer, this.byteOffset, this.length);
+        }
+        throw new Error("unexpected type");
+    }
+}
+// wrapped structure for transferring command/result from/to workers
+class HCATask {
+    constructor(taskID, cmd, args, replyArgs) {
+        this.transferList = [];
+        this._hasResult = false;
+        this.taskID = taskID;
+        this.cmd = cmd;
+        this._args = args === null || args === void 0 ? void 0 : args.map((arg) => HCATransTypedArray.convert(arg, this.transferList));
+        this._replyArgs = replyArgs;
+    }
+    get args() {
+        var _c;
+        return (_c = this._args) === null || _c === void 0 ? void 0 : _c.map((arg) => HCATransTypedArray.restore(arg));
+    }
+    get hasResult() {
+        return this._hasResult;
+    }
+    get result() {
+        if (!this._hasResult)
+            throw new Error("no result");
+        return HCATransTypedArray.restore(this._result);
+    }
+    set result(result) {
+        if (this.hasErr)
+            throw new Error("already has error, cannot set result");
+        if (this._hasResult)
+            throw new Error("cannot set result again");
+        this._result = HCATransTypedArray.convert(result, this.transferList);
+        this._hasResult = true;
+        if (!this._replyArgs)
+            delete this._args;
+    }
+    get hasErr() {
+        return this._errMsg != null;
+    }
+    get errMsg() {
+        return this._errMsg;
+    }
+    set errMsg(msg) {
+        // changing errMsg is allowed, but clearing errMsg is disallowed
+        if (typeof msg !== "string")
+            throw new Error("error message must be a string");
+        delete this._args;
+        if (this._hasResult) {
+            // clear result on error
+            delete this._result;
+            this._hasResult = false;
+            this.transferList = [];
+            this.args.forEach((arg) => HCATransTypedArray.convert(arg, this.transferList));
+        }
+        this._errMsg = msg;
+    }
+    static recreate(task) {
+        const recreated = new HCATask(task.taskID, task.cmd, task._args, task._replyArgs);
+        if (task._errMsg != null)
+            recreated.errMsg = task._errMsg;
+        else if (task._hasResult)
+            recreated.result = task._result;
+        return recreated;
+    }
+}
+class HCATaskQueue {
+    constructor(postMessage, destroy) {
+        this._isAlive = true;
+        this.isIdle = true;
+        // comparing to structured copy (by default),
+        // transferring is generally much faster if data size is big (because of zero-copy),
+        // however it obviously has a drawback that transferred arguments are no longer accessible in the sender thread
+        this.transferArgs = false;
+        // the receiver/callee will always use transferring to send back arguments,
+        // not sending the arguments back is supposed to save a little time/overhead
+        this.replyArgs = false;
+        this.queue = [];
+        this.lastTaskID = 0;
+        this.callbacks = {};
+        this.postMessage = postMessage;
+        this.destroy = destroy;
+    }
+    sendNextTask() {
+        const task = this.queue.shift();
+        if (task == null) {
+            this.isIdle = true;
         }
         else {
-            this.info = new HCAInfo(hca);
-            this.channel = this.initialize(this.info);
+            this.isIdle = false;
+            if (this.transferArgs)
+                this.postMessage(task, task.transferList);
+            else
+                this.postMessage(task);
         }
     }
-    initialize(info) {
-        let r = new Uint8Array(0x10);
-        let b = Math.floor(info.format.channelCount / info.compParam[2]);
-        if (info.compParam[6] && b > 1) {
-            for (let i = 0; i < info.compParam[2]; ++i)
-                switch (b) {
-                    case 8:
-                        r[i * b + 6] = 1;
-                        r[i * b + 7] = 2;
-                    case 7:
-                    case 6:
-                        r[i * b + 4] = 1;
-                        r[i * b + 5] = 2;
-                    case 5:
-                        if (b == 5 && info.compParam[3] <= 2) {
-                            r[i * b + 3] = 1;
-                            r[i * b + 4] = 2;
-                        }
-                    case 4:
-                        if (b == 4 && info.compParam[3] == 0) {
-                            r[i * b + 2] = 1;
-                            r[i * b + 3] = 2;
-                        }
-                    case 3:
-                    case 2:
-                        r[i * b] = 1;
-                        r[i * b + 1] = 2;
-                    default:
-                }
-        }
-        let channel = [];
-        for (let i = 0; i < info.format.channelCount; ++i) {
-            let c = new HCAChannelContext();
-            c.type = r[i];
-            c.value3 = c.value.subarray(info.compParam[5] + info.compParam[6]);
-            c.count = info.compParam[5] + (r[i] != 2 ? info.compParam[6] : 0);
-            channel.push(c);
-        }
-        return channel;
+    get isAlive() {
+        return this._isAlive;
     }
-    clone() {
-        let ret = new HCAInternalState(this);
-        return ret;
-    }
-}
-// Web Workers support
-if (typeof document === "undefined") {
-    // running in worker
-    onmessage = function (msg) {
-        function handleMsg(msg) {
-            switch (msg.data.cmd) {
-                case "nop":
-                    return;
-                case "info":
-                    return new HCAInfo(msg.data.args[0]);
-                case "fixHeaderChecksum":
-                    return HCAInfo.fixHeaderChecksum.apply(HCA, msg.data.args);
-                case "fixChecksum":
-                    return HCA.fixChecksum.apply(HCA, msg.data.args);
-                case "decrypt":
-                    return HCA.decrypt.apply(HCA, msg.data.args);
-                case "encrypt":
-                    return HCA.encrypt.apply(HCA, msg.data.args);
-                case "addCipherHeader":
-                    return HCAInfo.addCipherHeader.apply(HCAInfo, msg.data.args);
-                case "decode":
-                    return HCA.decode.apply(HCA, msg.data.args);
-                default:
-                    throw new Error("unknown cmd");
+    // these following two methods/functions are supposed to be callbacks
+    msgHandler(ev) {
+        // receiving cmd result
+        try {
+            const replied = HCATask.recreate(ev.data);
+            // find callback
+            const registered = this.callbacks[replied.taskID];
+            const callback = replied.hasErr
+                ? registered.reject
+                : replied.hasResult
+                    ? registered.resolve
+                    : (() => { throw new Error("replied no result or error"); })();
+            delete this.callbacks[replied.taskID];
+            // settle promise
+            try {
+                callback(replied.hasErr ? replied.errMsg : replied.result);
             }
-        }
-        // it's observed that Firefox refuses to postMessage an Error object:
-        // "DataCloneError: The object could not be cloned."
-        // (observed in Firefox 97, not clear about other versions)
-        // Chrome doesn't seem to have this problem,
-        // however, in order to keep compatible with Firefox,
-        // we still have to avoid posting an Error object
-        let reply = { taskID: msg.data.taskID };
-        try {
-            reply.result = handleMsg(msg);
+            catch (e) {
+                console.error(e);
+            }
+            // start next task
+            this.sendNextTask();
         }
         catch (e) {
             console.error(e);
-            reply.hasError = true;
-            reply.errMsg = "error during Worker executing cmd";
-            if (typeof e === "string" || e instanceof Error)
-                reply.errMsg += "\n" + e.toString();
-        }
-        try {
-            this.postMessage(reply);
-        }
-        catch (e) {
-            console.error(e);
-            reply.hasError = true;
-            reply.errMsg = (reply.errMsg == null ? "" : reply.errMsg + "\n\n") + "postMessage from Worker failed";
-            if (typeof e === "string" || e instanceof Error)
-                reply.errMsg += "\n" + e.toString();
-            delete reply.result;
-        }
-    };
-}
-// create & control worker
-class HCAWorker {
-    constructor(selfUrl, errHandlerCallback) {
-        this.lastTaskID = 0;
-        this.idle = true;
-        this.hasError = false;
-        this.isShutdown = false;
-        this.lastTick = 0;
-        this.selfUrl = selfUrl;
-        this.cmdQueue = [];
-        this.resultCallback = {};
-        this.hcaWorker = new Worker(selfUrl);
-        this.errHandlerCallback = errHandlerCallback != null ? errHandlerCallback : () => { };
-        this.hcaWorker.onmessage = (msg) => this.resultHandler(this, msg);
-        this.hcaWorker.onerror = (msg) => this.errHandler(this, msg);
-        this.hcaWorker.onmessageerror = (msg) => this.errHandler(this, msg);
-    }
-    execCmdQueueIfIdle() {
-        if (this.hasError)
-            throw new Error("there was once an error, which had shut down background HCAWorket thread");
-        if (this.isShutdown)
-            throw new Error("the Worker instance has been shut down");
-        if (this.idle) {
-            this.idle = false;
-            if (this.cmdQueue.length > 0)
-                this.hcaWorker.postMessage(this.cmdQueue[0]);
+            this.errHandler(e);
         }
     }
-    resultHandler(self, msg) {
-        let result = msg.data;
-        let taskID = result.taskID;
-        for (let i = 0; i < self.cmdQueue.length; i++) {
-            if (self.cmdQueue[i].taskID == taskID) {
-                let nextTask = undefined;
-                if (i + 1 < self.cmdQueue.length) {
-                    nextTask = self.cmdQueue[i + 1];
-                }
-                self.cmdQueue.splice(i, 1);
-                let callback = self.resultCallback[taskID][result.hasError ? "onErr" : "onResult"];
+    errHandler(data) {
+        // irrecoverable error
+        if (data instanceof MessageEvent)
+            data = data.data;
+        if (this._isAlive) {
+            this._isAlive = false;
+            // print error message
+            let errMsg = "";
+            if (typeof data === "string")
+                errMsg += `${data}`;
+            else if (data instanceof Error)
+                errMsg += `${data.toString()}`;
+            console.error(`destroying background worker on error ${errMsg}`);
+            // destroy background worker
+            try {
+                this.destroy();
+            }
+            catch (e) {
+                console.error(`cannot destroy, ${e}`);
+            }
+            // reject all pending promises
+            for (let taskID in this.callbacks) {
+                const reject = this.callbacks[taskID].reject;
+                delete this.callbacks[taskID];
                 try {
-                    callback(result[result.hasError ? "errMsg" : "result"]);
+                    reject(errMsg);
                 }
                 catch (e) {
-                    let errMsg = "";
-                    if (typeof e === "string" || e instanceof Error)
-                        errMsg = e.toString();
-                    this.errHandler(self, errMsg); // before delete self.resultCallback[taskID];
-                    return;
+                    console.error(`error rejecting ${taskID}, ${e}`);
                 }
-                delete self.resultCallback[taskID];
-                if (nextTask == undefined) {
-                    self.idle = true;
-                }
-                else {
-                    self.hcaWorker.postMessage(nextTask);
-                }
-                return;
             }
         }
-        throw new Error("taskID not found in cmdQueue");
     }
-    errHandler(self, err) {
-        self.hasError = true;
-        try {
-            self.hcaWorker.terminate();
-        }
-        catch (e) {
-            console.error(e);
-        }
-        try {
-            for (let taskID in self.resultCallback)
-                try {
-                    self.resultCallback[taskID].onErr(err);
-                }
-                catch (e) {
-                    console.error(e);
-                }
-        }
-        catch (e) {
-            console.error(e);
-        }
-        try {
-            self.errHandlerCallback(err);
-        }
-        catch (e) {
-            console.error(e);
-        }
+    getTransferConfig() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this._isAlive)
+                throw new Error("dead");
+            return yield this.execCmd("nop", [], () => ({ transferArgs: this.transferArgs, replyArgs: this.replyArgs }));
+        });
     }
-    sendCmdList(cmdlist) {
-        for (let i = 0; i < cmdlist.length; i++) {
-            let taskID = ++this.lastTaskID;
-            this.resultCallback[taskID] = { onResult: cmdlist[i].onResult, onErr: cmdlist[i].onErr };
-            this.cmdQueue.push({ taskID: taskID, cmd: cmdlist[i].cmd, args: cmdlist[i].args });
-        }
-        this.execCmdQueueIfIdle();
+    configTransfer(transferArgs, replyArgs) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this._isAlive)
+                throw new Error("dead");
+            return yield this.execCmd("nop", [], () => {
+                this.transferArgs = transferArgs ? true : false;
+                this.replyArgs = replyArgs ? true : false;
+            });
+        });
     }
-    sendCmd(cmd, args) {
-        return new Promise((resolve, reject) => this.sendCmdList([{ cmd: cmd, args: args, onResult: resolve, onErr: reject }]));
+    execCmd(cmd, args, resolveHook) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this._isAlive)
+                throw new Error("dead");
+            return yield new Promise((resolve, reject) => {
+                // assign new taskID
+                const taskID = ++this.lastTaskID;
+                const task = new HCATask(taskID, cmd, args, this.replyArgs);
+                // register callback
+                if (this.callbacks[taskID] != null)
+                    throw new Error(`callback ${taskID} already registered`);
+                const hookedResolve = resolveHook != null
+                    ? (result) => resolve(resolveHook(result))
+                    : (result) => resolve(result);
+                this.callbacks[taskID] = { resolve: hookedResolve, reject: reject };
+                // append to command queue
+                this.queue.push(task);
+                if (this.isIdle)
+                    this.sendNextTask();
+            });
+        });
     }
     shutdown() {
         return __awaiter(this, void 0, void 0, function* () {
-            yield this.sendCmd("nop", []);
-            this.hcaWorker.terminate();
-            this.isShutdown = true;
+            if (this._isAlive) {
+                yield this.execCmd("nop", [], () => {
+                    this.destroy();
+                    this._isAlive = false;
+                });
+            }
+        });
+    }
+}
+if (typeof document === "undefined") {
+    if (typeof onmessage === "undefined") {
+        // AudioWorklet
+        class HCAFramePlayer extends AudioWorkletProcessor {
+            constructor(options) {
+                super();
+                this.hasError = false;
+                this.shutdown = false;
+                this.isPulling = false;
+                this.isEnd = false;
+                this.defaultPullBlockCount = 128;
+                this.totalPulledBlockCount = 0;
+                this.sampleOffset = 0;
+                this.lastDecodedBlockIndex = -1;
+                if (options == null || options.processorOptions == null)
+                    throw new Error();
+                const procOpts = options.processorOptions;
+                this.frame = new HCAFrame(new HCAInfo(procOpts.rawHeader));
+                const info = this.frame.Hca;
+                this.hasLoop = info.hasHeader["loop"] ? true : false;
+                if (typeof procOpts.pullBlockCount === "number") {
+                    if (isNaN(procOpts.pullBlockCount))
+                        throw new Error();
+                    let pullBlockCount = Math.floor(procOpts.pullBlockCount);
+                    if (pullBlockCount < 2)
+                        throw new Error();
+                    this.pullBlockCount = pullBlockCount;
+                }
+                else
+                    this.pullBlockCount = this.defaultPullBlockCount;
+                const bufferedBlockCount = this.hasLoop ? (info.loop.end + 1) : this.pullBlockCount * 2;
+                this.encoded = new Uint8Array(info.blockSize * bufferedBlockCount);
+                this.decoded = Array.from({ length: info.format.channelCount }, () => new Float32Array(HCAFrame.SamplesPerFrame * 2));
+                this.port.onmessage = (ev) => {
+                    // TODO pause playing & set audioworklet to play new source
+                    if (typeof ev.data === "string")
+                        switch (ev.data) {
+                            case "shutdown":
+                                this.shutdown = true;
+                                break;
+                        }
+                    else
+                        try {
+                            const newBlocks = ev.data;
+                            if (newBlocks.length % info.blockSize != 0) {
+                                throw new Error(`newBlocks.length=${newBlocks.length} should be multiple of blockSize`);
+                            }
+                            const newBlockCount = newBlocks.length / info.blockSize;
+                            const expected = info.blockSize * this.pullBlockCount;
+                            if (this.hasLoop) {
+                                let encodedOffset = info.blockSize * this.totalPulledBlockCount;
+                                if (encodedOffset + newBlocks.length > this.encoded.length) {
+                                    throw new Error(`has loop header, buffer will overflow`);
+                                }
+                                this.encoded.set(newBlocks, encodedOffset);
+                            }
+                            else {
+                                if (newBlocks.length != expected) {
+                                    throw new Error(`no loop header, newBlocks.length (${newBlocks.length}) != expected (${expected})`);
+                                }
+                                switch (this.totalPulledBlockCount % (this.pullBlockCount * 2)) {
+                                    case 0:
+                                        this.encoded.set(newBlocks);
+                                        break;
+                                    case this.pullBlockCount:
+                                        this.encoded.set(newBlocks, expected);
+                                        break;
+                                    default:
+                                        throw new Error();
+                                }
+                            }
+                            this.totalPulledBlockCount += newBlockCount;
+                            this.isPulling = false;
+                        }
+                        catch (e) {
+                            this.hasError = true;
+                            console.error(e);
+                        }
+                };
+            }
+            writeToDecodedBuffer(frame) {
+                const halfSize = HCAFrame.SamplesPerFrame;
+                for (let c = 0; c < frame.Channels.length; c++) {
+                    const firstHalf = this.decoded[c].subarray(0, halfSize);
+                    const lastHalf = this.decoded[c].subarray(halfSize, halfSize * 2);
+                    firstHalf.set(lastHalf);
+                    for (let sf = 0, offset = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
+                        lastHalf.set(frame.Channels[c].PcmFloat[sf], offset);
+                        offset += HCAFrame.SamplesPerSubFrame;
+                    }
+                    for (let i = 0; i < lastHalf.length; i++) {
+                        if (lastHalf[i] > 1)
+                            lastHalf[i] = 1;
+                        else if (lastHalf[i] < -1)
+                            lastHalf[i] = -1;
+                    }
+                }
+            }
+            mapToUnLooped(sampleOffset) {
+                const info = this.frame.Hca;
+                if (sampleOffset <= info.endAtSample) {
+                    return sampleOffset;
+                }
+                else {
+                    if (this.hasLoop) {
+                        let offset = (sampleOffset - info.loopStartAtSample) % info.loopSampleCount;
+                        return info.loopStartAtSample + offset;
+                    }
+                    else {
+                        return info.endAtSample;
+                    }
+                }
+            }
+            process(inputs, outputs, parameters) {
+                if (this.shutdown || this.hasError) {
+                    this.port.postMessage("error");
+                    this.port.close();
+                    return false;
+                }
+                else if (this.isEnd) {
+                    return true;
+                }
+                try {
+                    const output = outputs[0];
+                    const renderQuantumSize = output[0].length;
+                    const samplesPerBlock = HCAFrame.SamplesPerFrame;
+                    // no more than one block will be decoded each time this function being called,
+                    // therefore one block must cover the whole renderQuantumSize
+                    if (samplesPerBlock < renderQuantumSize)
+                        throw new Error("render quantum requires more sample than a full block");
+                    const info = this.frame.Hca;
+                    // skip droppedHeader
+                    if (this.sampleOffset < info.format.droppedHeader) {
+                        this.sampleOffset = info.format.droppedHeader;
+                    }
+                    if (!this.hasLoop && this.sampleOffset >= info.endAtSample) {
+                        // nothing more to play
+                        this.port.postMessage("end");
+                        this.isEnd = true;
+                        return true;
+                    }
+                    // decode block & pull new block (if needed)
+                    const mappedStartOffset = this.mapToUnLooped(this.sampleOffset);
+                    const mappedEndOffset = this.mapToUnLooped(this.sampleOffset + renderQuantumSize);
+                    const inBlockStartOffset = mappedStartOffset % samplesPerBlock;
+                    const inBlockEndOffset = mappedEndOffset % samplesPerBlock;
+                    const startBlockIndex = (mappedStartOffset - inBlockStartOffset) / samplesPerBlock;
+                    const endBlockIndex = (mappedEndOffset - inBlockEndOffset) / samplesPerBlock;
+                    if (endBlockIndex != this.lastDecodedBlockIndex) {
+                        if (endBlockIndex < this.totalPulledBlockCount) {
+                            // block is available for decoding
+                            let start = info.blockSize * (this.hasLoop
+                                ? endBlockIndex
+                                : endBlockIndex % (this.pullBlockCount * 2));
+                            let end = start + info.blockSize;
+                            if (end > this.encoded.length)
+                                throw new Error("block end offset exceeds buffer size");
+                            HCA.decodeBlock(this.frame, this.encoded.subarray(start, end));
+                            this.writeToDecodedBuffer(this.frame);
+                            this.lastDecodedBlockIndex = endBlockIndex;
+                            if (this.totalPulledBlockCount < (this.hasLoop ? info.loop.end : info.format.blockCount)) {
+                                // pull blocks in advance
+                                let availableBlockCount = this.hasLoop && this.totalPulledBlockCount >= info.loop.end + 1
+                                    ? "all_pulled"
+                                    : this.totalPulledBlockCount - (this.lastDecodedBlockIndex + 1);
+                                if (typeof availableBlockCount === 'number' && availableBlockCount < this.pullBlockCount) {
+                                    if (!this.isPulling) {
+                                        // request to pull & continue decoding
+                                        this.port.postMessage("pull");
+                                        this.isPulling = true;
+                                    }
+                                }
+                            }
+                        }
+                        else {
+                            // block is unavailable
+                            if (!this.isPulling) {
+                                // pull & wait until available
+                                this.port.postMessage("pull");
+                                this.isPulling = true;
+                            }
+                            return true;
+                        }
+                    }
+                    // copy decoded data
+                    if (output.length != info.format.channelCount)
+                        throw new Error("channel count mismatch");
+                    const inBufferStartOffset = (endBlockIndex != startBlockIndex ? 0 : samplesPerBlock) + inBlockStartOffset;
+                    const inBufferEndOffset = samplesPerBlock + inBlockEndOffset;
+                    const inBufferSrcSize = inBufferEndOffset - inBufferStartOffset;
+                    if (inBufferSrcSize <= 0)
+                        throw new Error("size in decoded buffer should be positive");
+                    const copySize = Math.min(inBufferSrcSize, renderQuantumSize);
+                    for (let channel = 0; channel < output.length; channel++) {
+                        let src = this.decoded[channel].subarray(inBufferStartOffset, inBufferStartOffset + copySize);
+                        output[channel].set(src);
+                    }
+                    this.sampleOffset += copySize;
+                    if (this.hasLoop && this.sampleOffset > info.endAtSample) {
+                        // it's possible for sampleOffset to overflow because loop is infinite
+                        // rewinding it back to prevent overflow
+                        // (however, Number.MAX_SAFE_INTEGER seems to be able to handle about 64.7 centuries under 44.1kHz)
+                        this.sampleOffset = this.mapToUnLooped(this.sampleOffset);
+                    }
+                }
+                catch (e) {
+                    this.hasError = true;
+                    console.error(e);
+                }
+                return true;
+            }
+        }
+        registerProcessor("hca-frame-player", HCAFramePlayer);
+    }
+    else {
+        // Web Worker
+        onmessage = function (msg) {
+            const task = HCATask.recreate(msg.data);
+            function handleMsg() {
+                switch (task.cmd) {
+                    case "nop":
+                        return;
+                    case "fixHeaderChecksum":
+                        return HCAInfo.fixHeaderChecksum.apply(HCAInfo, task.args);
+                    case "fixChecksum":
+                        return HCA.fixChecksum.apply(HCA, task.args);
+                    case "decrypt":
+                        return HCA.decrypt.apply(HCA, task.args);
+                    case "encrypt":
+                        return HCA.encrypt.apply(HCA, task.args);
+                    case "addCipherHeader":
+                        return HCAInfo.addCipherHeader.apply(HCAInfo, task.args);
+                    case "decode":
+                        return HCA.decode.apply(HCA, task.args);
+                    default:
+                        throw new Error("unknown cmd");
+                }
+            }
+            // it's observed that Firefox refuses to postMessage an Error object:
+            // "DataCloneError: The object could not be cloned."
+            // (observed in Firefox 97, not clear about other versions)
+            // Chrome doesn't seem to have this problem,
+            // however, in order to keep compatible with Firefox,
+            // we still have to avoid posting an Error object
+            try {
+                task.result = handleMsg();
+            }
+            catch (e) {
+                console.error(e);
+                task.errMsg = "error during Worker executing cmd";
+                if (typeof e === "string" || e instanceof Error)
+                    task.errMsg += "\n" + e.toString();
+            }
+            try {
+                this.postMessage(task, task.transferList);
+            }
+            catch (e) {
+                console.error(e);
+                task.errMsg = (task.errMsg == null ? "" : task.errMsg + "\n\n") + "postMessage from Worker failed";
+                if (typeof e === "string" || e instanceof Error)
+                    task.errMsg += "\n" + e.toString();
+            }
+        };
+    }
+}
+// create & control audio worklet
+class HCAAudioWorkletHCAPlayer {
+    constructor(selfUrl, audioCtx, hcaPlayerNode, gainNode, feedBlockCount, info, source, srcBuf) {
+        this.isAlive = true;
+        this.isPlaying = false;
+        this.verifyCsum = false;
+        this.totalFedBlockCount = 0;
+        this.selfUrl = selfUrl;
+        this.audioCtx = audioCtx;
+        hcaPlayerNode.port.onmessage = (ev) => this.msgHandler(ev);
+        this.hcaPlayerNode = hcaPlayerNode;
+        this.gainNode = gainNode;
+        this.feedBlockCount = feedBlockCount;
+        this.info = info;
+        this.source = source;
+        this.srcBuf = srcBuf;
+        this.sampleRate = info.format.samplingRate;
+        this.channelCount = info.format.channelCount;
+        this.hasLoop = info.hasHeader["loop"] ? true : false;
+    }
+    get blockChecksumVerification() {
+        return this.verifyCsum;
+    }
+    set blockChecksumVerification(val) {
+        if (typeof val !== "boolean")
+            throw new Error();
+        this.verifyCsum = val;
+    }
+    get feedSize() {
+        return this.info.blockSize * this.feedBlockCount;
+    }
+    get remainingBlockCount() {
+        let total = this.hasLoop ? this.info.loop.end + 1 : this.info.format.blockCount;
+        let remaining = total - this.totalFedBlockCount;
+        if (remaining <= 0)
+            throw new Error();
+        return remaining;
+    }
+    get downloadBufferSize() {
+        const bytesPerSec = this.info.kbps * 1000 / 8;
+        return bytesPerSec * 4;
+    }
+    msgHandler(ev) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                if (typeof ev.data === "string")
+                    switch (ev.data) {
+                        case "error":
+                            throw new Error("AudioWorklet encountered an error");
+                        case "end":
+                            yield this.pause();
+                            return;
+                        case "pull":
+                            if (this.source == null) {
+                                console.error("nothing to feed");
+                                this.pause();
+                                return;
+                            }
+                            let blockCount = Math.min(this.feedBlockCount, this.remainingBlockCount);
+                            let size = this.info.blockSize * blockCount;
+                            let newBlocks;
+                            if (this.source instanceof Uint8Array) {
+                                // whole HCA mode
+                                let start = this.info.dataOffset + this.info.blockSize * this.totalFedBlockCount;
+                                let end = start + size;
+                                newBlocks = this.source.subarray(start, end);
+                                //} else if (this.source instanceof ReadableStreamDefaultReader) {
+                                // commented out because Firefox throws "ReferenceError: ReadableStreamDefaultReader is not defined"
+                            }
+                            else {
+                                // URL mode
+                                if (this.srcBuf == null)
+                                    throw new Error("srcBuf is undefined");
+                                let maxDownlaodSize = this.info.blockSize * this.remainingBlockCount;
+                                let downloadSize = Math.max(this.downloadBufferSize, size);
+                                downloadSize = Math.min(downloadSize, maxDownlaodSize);
+                                let remaining = downloadSize - this.srcBuf.length;
+                                if (remaining > 0) {
+                                    this.srcBuf = yield HCAAudioWorkletHCAPlayer.readAndAppend(this.source, this.srcBuf, remaining);
+                                }
+                                if (this.srcBuf.length < size)
+                                    throw new Error("srcBuf still smaller than expected");
+                                newBlocks = this.srcBuf.subarray(0, size);
+                                this.srcBuf = this.srcBuf.slice(size);
+                            }
+                            for (let i = 0, start = 0; i < blockCount; i++, start += this.info.blockSize) {
+                                let block = newBlocks.subarray(start, start + this.info.blockSize);
+                                // verify checksum (if enabled)
+                                // will throw & stop playing on mismatch!
+                                if (this.verifyCsum)
+                                    HCACrc16.verify(block, this.info.blockSize - 2);
+                                // decrypt (if encrypted)
+                                if (this.cipher != null)
+                                    this.cipher.mask(block, 0, this.info.blockSize - 2);
+                                // fix checksum
+                                HCACrc16.fix(block, this.info.blockSize - 2);
+                            }
+                            if (this.hasLoop) {
+                                // just copy, no need to enlarge
+                                newBlocks = newBlocks.slice();
+                            }
+                            else {
+                                // enlarge & copy
+                                let data = newBlocks;
+                                newBlocks = new Uint8Array(this.feedSize);
+                                newBlocks.set(data);
+                            }
+                            this.hcaPlayerNode.port.postMessage(newBlocks);
+                            this.totalFedBlockCount += blockCount;
+                            break;
+                        case "done":
+                            if (this.callbacks == null)
+                                throw new Error("resolveFunc is null");
+                            this.callbacks.resolve();
+                            this.callbacks = undefined;
+                            break;
+                    }
+            }
+            catch (e) {
+                console.error(e);
+                if (this.callbacks != null)
+                    try {
+                        this.callbacks.reject();
+                        this.callbacks = undefined;
+                    }
+                    catch (e) {
+                        console.error(e);
+                    }
+                this.destroy();
+            }
+        });
+    }
+    static create(selfUrl, source, feedByteMax = 32768) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!(selfUrl instanceof URL))
+                throw new Error();
+            if (!(source instanceof Uint8Array || source instanceof URL))
+                throw new Error();
+            if (typeof feedByteMax !== "number" || isNaN(feedByteMax))
+                throw new Error();
+            let actualSource;
+            let info;
+            let srcBuf = undefined;
+            if (source instanceof Uint8Array) {
+                actualSource = source;
+                info = new HCAInfo(source);
+            }
+            else if (source instanceof URL) {
+                const fetched = yield this.getHCAInfoFromURL(source);
+                actualSource = fetched.reader;
+                info = fetched.info;
+                srcBuf = fetched.buffer;
+            }
+            else
+                throw Error();
+            feedByteMax = Math.floor(feedByteMax);
+            if (feedByteMax < info.blockSize)
+                throw new Error();
+            feedByteMax -= feedByteMax % info.blockSize;
+            const feedBlockCount = feedByteMax / info.blockSize;
+            // create audio context
+            const audioCtx = new AudioContext({
+                latencyHint: "playback",
+                sampleRate: info.format.samplingRate,
+            });
+            // create audio worklet node (not yet connected)
+            yield audioCtx.audioWorklet.addModule(selfUrl);
+            const options = {
+                numberOfInputs: 0,
+                numberOfOutputs: 1,
+                outputChannelCount: [info.format.channelCount],
+                processorOptions: {
+                    rawHeader: info.getRawHeader(),
+                    pullBlockCount: feedBlockCount,
+                },
+            };
+            const hcaPlayerNode = new AudioWorkletNode(audioCtx, "hca-frame-player", options);
+            // create gain node
+            const gainNode = audioCtx.createGain();
+            // suspend audio context for now
+            yield audioCtx.suspend();
+            // create controller object
+            return new HCAAudioWorkletHCAPlayer(selfUrl, audioCtx, hcaPlayerNode, gainNode, feedBlockCount, info, actualSource, srcBuf);
+        });
+    }
+    destroy() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isAlive) {
+                console.error("already died");
+                return;
+            }
+            this.hcaPlayerNode.port.postMessage("shutdown");
+            this.hcaPlayerNode.port.close();
+            this.hcaPlayerNode.disconnect();
+            this.gainNode.disconnect();
+            yield this.audioCtx.close();
+            this.isAlive = false;
+        });
+    }
+    setDecryptionKey(key1, key2) {
+        if (!this.isAlive)
+            throw new Error("dead");
+        switch (this.info.cipher) {
+            case 0:
+                // not encrypted
+                this.cipher = undefined;
+                break;
+            case 1:
+                // encrypted with "no key"
+                this.cipher = new HCACipher("none"); // ignore given keys
+                break;
+            case 0x38:
+                // encrypted with keys - will yield incorrect waveform if incorrect keys are given!
+                this.cipher = new HCACipher(key1, key2);
+                break;
+            default:
+                throw new Error("unknown ciph.type");
+        }
+    }
+    static readAndAppend(reader, data, minCount) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (minCount < 0)
+                throw new Error();
+            const desired = data.length + minCount;
+            let newData = new Uint8Array(desired);
+            newData.set(data);
+            for (let offset = data.length; offset < desired;) {
+                const res = yield reader.read();
+                if (res.done)
+                    throw new Error();
+                const bytes = res.value;
+                if (bytes.length > 0) {
+                    const required = offset + bytes.length;
+                    if (required > newData.length) {
+                        const existing = newData;
+                        newData = new Uint8Array(required);
+                        newData.set(existing);
+                    }
+                    newData.set(bytes, offset);
+                    offset += bytes.length;
+                }
+            }
+            return newData;
+        });
+    }
+    static getHCAInfoFromURL(url) {
+        return __awaiter(this, void 0, void 0, function* () {
+            // FIXME Firefox seems to download whole file before any readout
+            const resp = yield fetch(url.href);
+            if (resp.status != 200)
+                throw new Error(`status ${resp.status}`);
+            if (resp.body == null)
+                throw new Error("response has no body");
+            const reader = resp.body.getReader();
+            let buffer = yield this.readAndAppend(reader, new Uint8Array(0), 8);
+            const dataOffset = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength).getUint16(6);
+            const remaining = dataOffset - buffer.length;
+            if (remaining > 0) {
+                buffer = yield this.readAndAppend(reader, buffer, remaining);
+            }
+            return {
+                reader: reader,
+                info: new HCAInfo(buffer),
+                buffer: buffer.slice(dataOffset),
+            };
+        });
+    }
+    setSource(source) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isAlive)
+                throw new Error("dead");
+            let newInfo;
+            let newSource;
+            let newBuffer = undefined;
+            if (source instanceof Uint8Array) {
+                newSource = source;
+                newInfo = new HCAInfo(source);
+            }
+            else if (source instanceof URL) {
+                const result = yield HCAAudioWorkletHCAPlayer.getHCAInfoFromURL(source);
+                newSource = result.reader;
+                newInfo = result.info;
+                newBuffer = result.buffer;
+            }
+            else
+                throw new Error("invalid source");
+            // sample rate and channel count is immutable,
+            // therefore, the only way to change them is to recreate a new instance.
+            // however, there is a memleak bug in Chromium, that:
+            // (no-longer-used) audio worklet node(s) won't be recycled:
+            // https://bugs.chromium.org/p/chromium/issues/detail?id=1298955
+            if (newInfo.format.samplingRate != this.sampleRate)
+                throw new Error("sample rate mismatch");
+            if (newInfo.format.channelCount != this.channelCount)
+                throw new Error("channel count mismatch");
+            // TODO pause playing & set audioworklet to play new source
+            yield new Promise((res, rej) => {
+                this.callbacks = { resolve: res, reject: rej };
+                this.hcaPlayerNode.port.postMessage({ rawHeader: newInfo.getRawHeader() });
+            });
+            this.info = newInfo;
+            this.source = newSource;
+            this.srcBuf = newBuffer;
+        });
+    }
+    play() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isAlive)
+                throw new Error("dead");
+            if (this.isPlaying)
+                return;
+            if (this.source == null)
+                throw new Error("nothing to play");
+            this.hcaPlayerNode.connect(this.gainNode);
+            this.gainNode.connect(this.audioCtx.destination);
+            yield this.audioCtx.resume();
+            this.isPlaying = true;
+        });
+    }
+    pause() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isAlive)
+                throw new Error("dead");
+            if (!this.isPlaying)
+                return;
+            yield this.audioCtx.suspend();
+            this.hcaPlayerNode.disconnect();
+            this.gainNode.disconnect();
+            this.isPlaying = false;
+        });
+    }
+}
+// create & control worker
+class HCAWorker {
+    constructor(selfUrl) {
+        this.lastTick = 0;
+        if (selfUrl instanceof URL)
+            this.selfUrl = selfUrl;
+        else if (typeof selfUrl === "string")
+            this.selfUrl = new URL(selfUrl, document.baseURI);
+        else
+            throw new Error("selfUrl must be either string or URL");
+        this.hcaWorker = new Worker(this.selfUrl);
+        this.taskQueue = new HCATaskQueue((msg, trans) => this.hcaWorker.postMessage(msg, trans), () => this.hcaWorker.terminate);
+        this.hcaWorker.onmessage = (msg) => this.taskQueue.msgHandler(msg);
+        this.hcaWorker.onerror = (msg) => this.taskQueue.errHandler(msg);
+        this.hcaWorker.onmessageerror = (msg) => this.taskQueue.errHandler(msg);
+    }
+    get isAlive() {
+        return this.taskQueue.isAlive;
+    }
+    shutdown() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (this.taskQueue.isAlive) {
+                yield this.taskQueue.shutdown();
+                if (this.awHcaPlayer != null)
+                    this.awHcaPlayer.destroy();
+            }
         });
     }
     tick() {
         return __awaiter(this, void 0, void 0, function* () {
-            yield this.sendCmd("nop", []);
+            yield this.taskQueue.execCmd("nop", []);
             this.lastTick = new Date().getTime();
         });
     }
     tock(text = "") {
         return __awaiter(this, void 0, void 0, function* () {
-            let duration = yield this.sendCmd("nop", []);
-            console.log(`${text} took ${new Date().getTime() - this.lastTick} ms`);
+            yield this.taskQueue.execCmd("nop", []);
+            const duration = new Date().getTime() - this.lastTick;
+            console.log(`${text} took ${duration} ms`);
             return duration;
         });
     }
     // commands
-    info(hca) {
+    getTransferConfig() {
         return __awaiter(this, void 0, void 0, function* () {
-            return yield this.sendCmd("info", [hca]);
+            return yield this.taskQueue.getTransferConfig();
+        });
+    }
+    configTransfer(transferArgs, replyArgs) {
+        return __awaiter(this, void 0, void 0, function* () {
+            return yield this.taskQueue.configTransfer(transferArgs, replyArgs);
         });
     }
     fixHeaderChecksum(hca) {
         return __awaiter(this, void 0, void 0, function* () {
-            return yield this.sendCmd("fixHeaderChecksum", [hca]);
+            return yield this.taskQueue.execCmd("fixHeaderChecksum", [hca]);
         });
     }
     fixChecksum(hca) {
         return __awaiter(this, void 0, void 0, function* () {
-            return yield this.sendCmd("fixChecksum", [hca]);
+            return yield this.taskQueue.execCmd("fixChecksum", [hca]);
         });
     }
-    decrypt(hca, key1 = undefined, key2 = undefined) {
+    decrypt(hca, key1, key2) {
         return __awaiter(this, void 0, void 0, function* () {
-            return yield this.sendCmd("decrypt", [hca, key1, key2]);
+            return yield this.taskQueue.execCmd("decrypt", [hca, key1, key2]);
         });
     }
-    encrypt(hca, key1 = undefined, key2 = undefined) {
+    encrypt(hca, key1, key2) {
         return __awaiter(this, void 0, void 0, function* () {
-            return yield this.sendCmd("encrypt", [hca, key1, key2]);
+            return yield this.taskQueue.execCmd("encrypt", [hca, key1, key2]);
         });
     }
     addHeader(hca, sig, newData) {
         return __awaiter(this, void 0, void 0, function* () {
-            return yield this.sendCmd("addHeader", [hca, sig, newData]);
+            return yield this.taskQueue.execCmd("addHeader", [hca, sig, newData]);
         });
     }
-    addCipherHeader(hca, cipherType = undefined) {
+    addCipherHeader(hca, cipherType) {
         return __awaiter(this, void 0, void 0, function* () {
-            return yield this.sendCmd("addCipherHeader", [hca, cipherType]);
+            return yield this.taskQueue.execCmd("addCipherHeader", [hca, cipherType]);
         });
     }
     decode(hca, mode = 32, loop = 0, volume = 1.0) {
         return __awaiter(this, void 0, void 0, function* () {
-            return yield this.sendCmd("decode", [hca, mode, loop, volume]);
+            return yield this.taskQueue.execCmd("decode", [hca, mode, loop, volume]);
+        });
+    }
+    playWholeHCA(hca, key1, key2) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (this.awHcaPlayer == null) {
+                this.awHcaPlayer = yield HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca);
+            }
+            else {
+                yield this.awHcaPlayer.setSource(hca);
+            }
+            this.awHcaPlayer.setDecryptionKey(key1, key2);
+            yield this.awHcaPlayer.play();
+        });
+    }
+    playHCAFromURL(url, key1, key2) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (typeof url === "string")
+                url = new URL(url, document.baseURI);
+            if (this.awHcaPlayer == null) {
+                this.awHcaPlayer = yield HCAAudioWorkletHCAPlayer.create(this.selfUrl, url);
+            }
+            else {
+                yield this.awHcaPlayer.setSource(url);
+            }
+            this.awHcaPlayer.setDecryptionKey(key1, key2);
+            yield this.awHcaPlayer.play();
+        });
+    }
+    pausePlaying() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (this.awHcaPlayer == null)
+                throw new Error();
+            yield this.awHcaPlayer.pause();
+        });
+    }
+    resumePlaying() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (this.awHcaPlayer == null)
+                throw new Error();
+            yield this.awHcaPlayer.play();
         });
     }
 }
@@ -1768,9 +3266,10 @@ class HCAWorker {
 
         // local file picker
         const localfile = document.getElementById("localfile");
+        const localfileform = document.getElementById("localfileform");
         // reset state on refresh
         // https://bugzilla.mozilla.org/show_bug.cgi?id=685657
-        localfile.value = null;
+        localfileform.reset();
 
         // input HCA URL
         const urlinput = document.getElementById("urlinput");
@@ -1838,7 +3337,7 @@ class HCAWorker {
                         ["Dropped smpl. (tail)", info.format.droppedFooter],
                     ]],
                     ["Block size", !info.hasHeader["comp"] && !info.hasHeader["dec"] ? null : info.blockSize],
-                    ["Bitrate", !info.hasHeader["comp"] && !info.hasHeader["dec"] ? null : info.bps],
+                    ["Bitrate (kbps)", !info.hasHeader["comp"] && !info.hasHeader["dec"] ? null : info.kbps],
                     ["VBR", info.hasHeader["vbr"] ? "yes" : "no"],
                     ["ATH", !info.hasHeader["ath"] ? null : toHex(info.ath)],
                     ["Loop", !info.hasHeader["loop"] ? null : [
@@ -1848,7 +3347,7 @@ class HCAWorker {
                         ["Dropped smpl. (tail)", info.loop.droppedFooter],
                     ]],
                     ["Cipher", !info.hasHeader["ciph"] ? null : toHex(info.cipher)],
-                    ["RVA", !info.hasHeader["rva"] ? null : info.rva],
+                    ["RVA (volume)", !info.hasHeader["rva"] ? null : info.rva],
                     ["Comment", !info.hasHeader["comm"] ? null : info.comment],
                 ];
                 for (let item of hcaInfoTextArray) {
@@ -1899,7 +3398,7 @@ class HCAWorker {
             let defVal = decodingParam[paramName].defVal;
             let attr = {};
             ["min", "max", "step"].forEach((attrName) => attr[attrName] = el.getAttribute(attrName));
-            function clampVal(val) {
+            let clampVal = function (val) {
                 if (val == null || val === "")
                     return defVal;
                 val = parseInt(val);
@@ -1993,6 +3492,7 @@ class HCAWorker {
             });
         }
         function clearAllData() {
+            localfileform.reset();
             for (let suffix in hcaFileData) {
                 hcaFileData[suffix].data = null;
             }
@@ -2036,7 +3536,7 @@ class HCAWorker {
             },
             shutdownbtn: async (self) => {
                 if (worker != null) {
-                    worker.shutdown();
+                    await worker.shutdown();
                     worker = null;
                     console.log("background worker is now shut down");
                 }
@@ -2050,7 +3550,7 @@ class HCAWorker {
                 fileName = newFileName;
                 // clear all existing data
                 clearAllData();
-                disableWholeFileButtons();
+                resetButtonsExcept(self.id);
                 // update data
                 let ab = await file.arrayBuffer();
                 hcaFileData.original.data = new Uint8Array(ab);
@@ -2058,6 +3558,7 @@ class HCAWorker {
                 // let the button bounce
                 self.disabled = false;
                 // next step
+                buttons.awplaywholehcabtn = true;
                 buttons.infobtn = true;
                 buttons.fixcsumbtn = true;
             },
@@ -2111,7 +3612,7 @@ class HCAWorker {
                 fileName = newFileName;
                 // clear all existing data
                 clearAllData();
-                disableWholeFileButtons();
+                resetButtonsExcept(self.id);
                 // update data
                 let ab = await response.arrayBuffer();
                 hcaFileData.original.data = new Uint8Array(ab);
@@ -2119,8 +3620,35 @@ class HCAWorker {
                 // let the button bounce
                 self.disabled = false;
                 // next step
+                buttons.awplaywholehcabtn = true;
                 buttons.infobtn = true;
                 buttons.fixcsumbtn = true;
+            },
+            awplaywholehcabtn: async (self) => {
+                try {
+                    await worker.playWholeHCA(hcaFileData.original.data, keys.key1, keys.key2);
+                    self.textContent = "Play (successful)";
+                } catch (e) {
+                    self.textContent = "Play (failed)";
+                    console.log(e);
+                }
+                // let the button bounce
+                self.disabled = false;
+                // next step
+                // TODO pause/rewind/fast-forward etc
+            },
+            awplayfromurlbtn: async (self) => {
+                try {
+                    await worker.playHCAFromURL(urlinput.value, keys.key1, keys.key2);
+                    self.textContent = "Play (successful)";
+                } catch (e) {
+                    self.textContent = "Play (failed)";
+                    console.log(e);
+                }
+                // let the button bounce
+                self.disabled = false;
+                // next step
+                // TODO pause/rewind/fast-forward etc
             },
             infobtn: async (self) => {
                 let hca = hcaFileData[
@@ -2132,10 +3660,7 @@ class HCAWorker {
                     })
                 ].data;
                 try {
-                    worker.tick();
-                    let infoPromise = worker.info(hca);
-                    worker.tock("get HCA info");
-                    let info = await infoPromise;
+                    let info = new HCAInfo(hca);
                     self.textContent = "get HCA info (successful)";
                     // update table content
                     hcaInfoTable.body.data = info;
@@ -2229,21 +3754,33 @@ class HCAWorker {
             });
         }
         buttons.startworkerbtn = "click"; // start background worker
-        function disableWholeFileButtons() {
+        function resetButtonsExcept(exceptBtnID) {
             for (let btnID in buttons) {
-                switch (btnID) {
+                if (btnID !== exceptBtnID) switch (btnID) {
                     case "startworkerbtn":
+                        buttons[btnID] = worker == null || !worker.isAlive;
+                        break;
                     case "shutdownbtn":
+                        buttons[btnID] = worker != null && worker.isAlive;
+                        break;
                     case "loadfilebtn":
+                        buttons[btnID] = false;
+                        break;
                     case "downloadbtn":
+                        buttons[btnID] = true;
+                        break;
+                    case "awplaywholehcabtn":
+                        buttons[btnID] = false;
+                        break;
+                    case "awplayfromurlbtn":
+                        buttons[btnID] = true;
                         break;
                     default:
                         buttons[btnID] = false;
                 }
             }
         }
-        buttons.loadfilebtn = false;
-        disableWholeFileButtons(); // same to above, reset state on refresh
+        resetButtonsExcept(); // same to above, reset state on refresh
         async function encryptOrDecrypt(self, isEncrypting) {
             const action = isEncrypting ? "encrypt" : "decrypt";
             const opposite = isEncrypting ? "decrypt" : "encrypt";

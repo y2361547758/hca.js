@@ -20,7 +20,13 @@
     key2=<input type="text" spellcheck="false" id="key2input" value="0x00000000"><br>
     <i>Note: output waveform will be nothing but unpleasant meaningless noise if incorrect keys are given!</i><br>
     <hr>
-    <h3>Set decoding mode/loop count/volume</h3>
+    <h3>Streaming (<a href="https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet">AudioWorklet API</a>)</h3>
+    Play a HCA file, which has been fully loaded/downloaded above:<br>
+    <button id="awplaywholehcabtn">Play</button><br>
+    Play directly from the URL above, without fully downloading the whole file:<br>
+    <button id="awplayfromurlbtn">Play</button><br>
+    <hr>
+    <h3>Decode the whole file</h3>
     Decoding mode: <input type="number" step="8" min="0" max="32" placeholder="0-99" id="decodingmodeinput" value="16"><br>
     Loop count: <input type="number" step="1" min="0" max="99" placeholder="0-99" id="loopcountinput" value="0"><br>
     Volume: <input type="number" step="1" min="0" max="100" placeholder="0-100" id="volumeinput" value="100"><br>
@@ -30,8 +36,6 @@
     (3) Loop count doesn't count the existing part which is originally supposed to be looped.<br>
     &nbsp;&nbsp;&nbsp;&nbsp;<b>In other words, actual loop count will be: the number set here plus one.</b><br>
     (4) When <b>decoding the whole file</b>, setting loop count to <b>zero</b> means: <b>disabling loop</b>.</b><br>
-    <hr>
-    <h3>Decode the whole file</h3>
     <button disabled id="infobtn">get HCA info</button><br>
     <style>
         table {
@@ -376,6 +380,7 @@
                 // let the button bounce
                 self.disabled = false;
                 // next step
+                buttons.awplaywholehcabtn = true;
                 buttons.infobtn = true;
                 buttons.fixcsumbtn = true;
             },
@@ -437,8 +442,35 @@
                 // let the button bounce
                 self.disabled = false;
                 // next step
+                buttons.awplaywholehcabtn = true;
                 buttons.infobtn = true;
                 buttons.fixcsumbtn = true;
+            },
+            awplaywholehcabtn: async (self) => {
+                try {
+                    await worker.playWholeHCA(hcaFileData.original.data, keys.key1, keys.key2);
+                    self.textContent = "Play (successful)";
+                } catch (e) {
+                    self.textContent = "Play (failed)";
+                    console.log(e);
+                }
+                // let the button bounce
+                self.disabled = false;
+                // next step
+                // TODO pause/rewind/fast-forward etc
+            },
+            awplayfromurlbtn: async (self) => {
+                try {
+                    await worker.playHCAFromURL(urlinput.value, keys.key1, keys.key2);
+                    self.textContent = "Play (successful)";
+                } catch (e) {
+                    self.textContent = "Play (failed)";
+                    console.log(e);
+                }
+                // let the button bounce
+                self.disabled = false;
+                // next step
+                // TODO pause/rewind/fast-forward etc
             },
             infobtn: async (self) => {
                 let hca = hcaFileData[
@@ -557,6 +589,12 @@
                         buttons[btnID] = false;
                         break;
                     case "downloadbtn":
+                        buttons[btnID] = true;
+                        break;
+                    case "awplaywholehcabtn":
+                        buttons[btnID] = false;
+                        break;
+                    case "awplayfromurlbtn":
                         buttons[btnID] = true;
                         break;
                     default:
