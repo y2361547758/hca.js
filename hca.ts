@@ -2657,28 +2657,24 @@ class HCATaskQueue {
     }
     errHandler(data: any) {
         // irrecoverable error
-        if (data instanceof MessageEvent) data = data.data;
         if (this._isAlive) {
             this._isAlive = false;
             // print error message
-            let errMsg = "";
-            if (typeof data === "string") errMsg += `${data}`;
-            else if (data instanceof Error) errMsg += `${data.toString()}`;
-            console.error(`destroying background worker on error ${errMsg}`);
+            console.error("destroying background worker on error", data);
             // destroy background worker
             try {
                 this.destroy();
             } catch (e) {
-                console.error(`cannot destroy, ${e}`);
+                console.error("cannot destroy", e);
             }
             // reject all pending promises
             for (let taskID in this.callbacks) {
                 const reject = this.callbacks[taskID].reject;
                 delete this.callbacks[taskID];
                 try {
-                    reject(errMsg);
+                    reject();
                 } catch (e) {
-                    console.error(`error rejecting ${taskID}, ${e}`);
+                    console.error(`error rejecting ${taskID}`, e);
                 }
             }
         }
