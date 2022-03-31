@@ -186,24 +186,24 @@ async function decryptAndDecode(hca) {
 
  - **`selfUrl` should be the URL of `hca.js` itself.**
 
-### `async hcaWorkerInstance.fixHeaderChecksum(hca: Uint8Array): Uint8Array`
-### `async hcaWorkerInstance.fixChecksum(hca: Uint8Array): Uint8Array`
+### `async hcaWorkerInstance.fixHeaderChecksum(hca: Uint8Array): Promise<Uint8Array>`
+### `async hcaWorkerInstance.fixChecksum(hca: Uint8Array): Promise<Uint8Array>`
 
  - Similar to the [HCAInfo.fixHeaderChecksum](#hcainfofixheaderchecksumhca-uint8array-uint8array)/[HCA.fixChecksum](#hcafixchecksumhca-uint8array-uint8array) raw APIs described above.
 
-### `async hcaWorkerInstance.addCipherHeader(hca: Uint8Array, cipherType?: number): Uint8Array`
-### `async hcaWorkerInstance.addHeader(hca: Uint8Array, sig: string, newData: Uint8Array): Uint8Array`
+### `async hcaWorkerInstance.addCipherHeader(hca: Uint8Array, cipherType?: number): Promise<Uint8Array>`
+### `async hcaWorkerInstance.addHeader(hca: Uint8Array, sig: string, newData: Uint8Array): Promise<Uint8Array>`
 
  - Similar to the [HCAInfo.addCipherHeader](#hcainfoaddcipherheaderhca-uint8array-ciphertype-number--undefined--undefined-uint8array)/[HCAInfo.addHeader](#hcainfoaddheaderhca-uint8array-sig-string-newdata-uint8array-uint8array) raw APIs described above.
 
-### `async hcaWorkerInstance.decrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array`
-### `async hcaWorkerInstance.encrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array`
-### `async hcaWorkerInstance.decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0): Uint8Array`
+### `async hcaWorkerInstance.decrypt(hca: Uint8Array, key1?: any, key2?: any): Promise<Uint8Array>`
+### `async hcaWorkerInstance.encrypt(hca: Uint8Array, key1?: any, key2?: any): Promise<Uint8Array>`
+### `async hcaWorkerInstance.decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0): Promise<Uint8Array>`
 
  - Similar to the [HCA.decrypt](#hcadecrypthca-uint8array-key1-any--undefined-key2-any--undefined-uint8array)/[HCA.encrypt](#hcaencrypthca-uint8array-key1-any--undefined-key2-any--undefined-uint8array)/[HCA.decode](#hcadecodehca-uint8array-mode--32-loop--0-volume--10-uint8array) raw APIs described above.
 
-### `async hcaWorkerInstance.tick(): void`
-### `async hcaWorkerInstance.tock(text = ""): int`
+### `async hcaWorkerInstance.tick(): Promise<void>`
+### `async hcaWorkerInstance.tock(text = ""): Promise<number>`
 
  - Measure how long a command being executed by the `Worker` controlled by `hcaWorkerInstance` takes.
 
@@ -230,7 +230,7 @@ async function decryptAndDecode(hca) {
    await hcaWorkerInstance.tock();
    ```
 
-### `async hcaWorkerInstance.shutdown(): void`
+### `async hcaWorkerInstance.shutdown(): Promise<void>`
 
  - Gracefully shut down the `Worker` controlled by `hcaWorkerInstance`.
 
