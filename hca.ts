@@ -2529,6 +2529,7 @@ class HCATransTypedArray {
 
 // wrapped structure for transferring command/result from/to workers
 class HCATask {
+    readonly origin: string;
     readonly taskID: number;
     readonly cmd: string;
     get args(): any {
@@ -2574,14 +2575,15 @@ class HCATask {
     private _result?: any;
     private _errMsg?: string;
     private readonly _replyArgs: boolean;
-    constructor (taskID: number, cmd: string, args: any[] | undefined, replyArgs: boolean) {
+    constructor (origin: string, taskID: number, cmd: string, args: any[] | undefined, replyArgs: boolean) {
+        this.origin = origin;
         this.taskID = taskID;
         this.cmd = cmd;
         this._args = args?.map((arg) => HCATransTypedArray.convert(arg, this.transferList));
         this._replyArgs = replyArgs;
     }
     static recreate(task: HCATask): HCATask {
-        const recreated = new HCATask(task.taskID, task.cmd, task._args, task._replyArgs);
+        const recreated = new HCATask(task.origin, task.taskID, task.cmd, task._args, task._replyArgs);
         if (task._errMsg != null) recreated.errMsg = task._errMsg;
         else if (task._hasResult) recreated.result = task._result;
         return recreated;
@@ -2589,22 +2591,36 @@ class HCATask {
 }
 
 class HCATaskQueue {
+    private readonly origin: string;
+
     private _isAlive = true;
     private isIdle = true;
 
-    // comparing to structured copy (by default),
-    // transferring is generally much faster if data size is big (because of zero-copy),
-    // however it obviously has a drawback that transferred arguments are no longer accessible in the sender thread
+    // comparing to structured copy (by default), if data size is big (because of zero-copy),
+    // transferring is generally much faster. however it obviously has a drawback,
+    // that transferred arguments are no longer accessible in the sender thread
     private transferArgs = false;
     // the receiver/callee will always use transferring to send back arguments,
     // not sending the arguments back is supposed to save a little time/overhead
     private replyArgs = false;
 
     private readonly postMessage: Function;
+    private readonly taskHandler: Function;
     private readonly destroy: Function;
     private queue: HCATask[] = [];
     private lastTaskID = 0;
     private callbacks: Record<number, {resolve: Function, reject: Function}> = {};
+
+    private sendTask(task: HCATask): void {
+        if (task.origin !== this.origin) throw new Error("the task to be sent must have the same origin as the task queue");
+        if (this.transferArgs) this.postMessage(task, task.transferList);
+        else this.postMessage(task);
+    }
+
+    private sendReply(task: HCATask): void {
+        if (task.origin === this.origin) throw new Error("the reply to be sent must not have the same origin as the task queue");
+        this.postMessage(task, task.transferList); // always use transferring to send back arguments
+    }
 
     private sendNextTask(): void {
         const task = this.queue.shift();
@@ -2612,13 +2628,14 @@ class HCATaskQueue {
             this.isIdle = true;
         } else {
             this.isIdle = false;
-            if (this.transferArgs) this.postMessage(task, task.transferList);
-            else this.postMessage(task);
+            this.sendTask(task);
         }
     }
 
-    constructor (postMessage: Function, destroy: Function) {
+    constructor (origin: string, postMessage: Function, taskHandler: Function, destroy: Function) {
+        this.origin = origin;
         this.postMessage = postMessage;
+        this.taskHandler = taskHandler;
         this.destroy = destroy;
     }
 
@@ -2627,46 +2644,72 @@ class HCATaskQueue {
     }
 
     // these following two methods/functions are supposed to be callbacks
-    msgHandler(ev: MessageEvent) {
-        // receiving cmd result
+    async msgHandler(ev: MessageEvent): Promise<void> {
         try {
-            const replied = HCATask.recreate(ev.data);
+            const task = HCATask.recreate(ev.data);
+            if (task.origin !== this.origin) {
+                // incoming cmd to execute
+                try {
+                    task.result = await this.taskHandler(task);
+                } catch (e) {
+                    console.error(`[${this.origin}]`, e);
+                    // it's observed that Firefox refuses to postMessage an Error object:
+                    // "DataCloneError: The object could not be cloned."
+                    // (observed in Firefox 97, not clear about other versions)
+                    // Chrome doesn't seem to have this problem,
+                    // however, in order to keep compatible with Firefox,
+                    // we still have to avoid posting an Error object
+                    task.errMsg = `[origin=${this.origin}] error when executing cmd`;
+                    if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
+                }
+                try {
+                    this.sendReply(task);
+                } catch (e) {
+                    console.error(`[${this.origin}]`, e);
+                    task.errMsg = (task.errMsg == null ? "" : task.errMsg + "\n\n") + "postMessage from Worker failed";
+                    if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
+                    // try again
+                    this.sendReply(task); // if it throws, just let it throw
+                }
+            } else {
+                // receiving cmd result
+                // find callback
+                const registered = this.callbacks[task.taskID];
+                const callback = task.hasErr
+                    ? registered.reject
+                    : task.hasResult
+                        ? registered.resolve
+                        : (() => {throw new Error("replied no result or error");})();
+                delete this.callbacks[task.taskID];
 
-            // find callback
-            const registered = this.callbacks[replied.taskID];
-            const callback = replied.hasErr
-                ? registered.reject
-                : replied.hasResult
-                    ? registered.resolve
-                    : (() => {throw new Error("replied no result or error");})();
-            delete this.callbacks[replied.taskID];
+                // settle promise
+                try {
+                    callback(task.hasErr ? task.errMsg : task.result);
+                } catch (e) {
+                    console.error(`${this.origin}`, e);
+                }
 
-            // settle promise
-            try {
-                callback(replied.hasErr ? replied.errMsg : replied.result);
-            } catch (e) {
-                console.error(e);
+                // start next task
+                this.sendNextTask();
             }
-
-            // start next task
-            this.sendNextTask();
         } catch (e) {
-            console.error(e);
+            // irrecoverable error
             this.errHandler(e);
         }
     }
     errHandler(data: any) {
         // irrecoverable error
         if (this._isAlive) {
-            this._isAlive = false;
             // print error message
-            console.error("destroying background worker on error", data);
+            console.error(`[${this.origin}] destroying background worker on error`, data);
             // destroy background worker
             try {
                 this.destroy();
             } catch (e) {
-                console.error("cannot destroy", e);
+                console.error(`[${this.origin}] cannot destroy`, e);
             }
+            // set isAlive to false - must be after destroy()
+            this._isAlive = false;
             // reject all pending promises
             for (let taskID in this.callbacks) {
                 const reject = this.callbacks[taskID].reject;
@@ -2674,7 +2717,7 @@ class HCATaskQueue {
                 try {
                     reject();
                 } catch (e) {
-                    console.error(`error rejecting ${taskID}`, e);
+                    console.error(`[${this.origin}] error rejecting ${taskID}`, e);
                 }
             }
         }
@@ -2697,7 +2740,7 @@ class HCATaskQueue {
         return await new Promise((resolve, reject) => {
             // assign new taskID
             const taskID = ++this.lastTaskID;
-            const task = new HCATask(taskID, cmd, args, this.replyArgs);
+            const task = new HCATask(this.origin, taskID, cmd, args, this.replyArgs);
             // register callback
             if (this.callbacks[taskID] != null) throw new Error(`callback ${taskID} already registered`);
             const hookedResolve = resolveHook != null
@@ -2708,6 +2751,12 @@ class HCATaskQueue {
             this.queue.push(task);
             if (this.isIdle) this.sendNextTask();
         });
+    }
+
+    sendCmd(cmd: string, args: any[]): void {
+        if (!this._isAlive) throw new Error("dead");
+        const task = new HCATask(this.origin, -1, cmd, args, false);
+        this.sendTask(task);
     }
 
     async shutdown(): Promise<void> {
@@ -2723,34 +2772,41 @@ class HCATaskQueue {
 if (typeof document === "undefined") {
     if (typeof onmessage === "undefined") {
         // AudioWorklet
-        class HCAFramePlayer extends AudioWorkletProcessor {
-            private hasError = false;
-            private shutdown = false;
-            private isPulling = false;
-            private isEnd = false;
+        interface HCAFramePlayerProcessorOptions {
+            rawHeader: Uint8Array,
+            pullBlockCount?: number,
+        }
+        class HCAFramePlayerParams {
+            abandoned = false;
+            abandonDoneCallback?: Function;
 
-            private readonly defaultPullBlockCount = 128;
-            private readonly pullBlockCount: number;
+            readonly defaultPullBlockCount = 128;
+            pullBlockCount: number;
 
-            private readonly frame: HCAFrame;
-            private readonly hasLoop: boolean;
+            frame: HCAFrame;
+            hasLoop: boolean;
 
             // if loop header exists, all blocks (up to loop end) are stored in encoded buffer,
             // otherwise, only 2 * pullBlockCount blocks are stored in encoded buffer
-            private readonly encoded: Uint8Array;
-            private totalPulledBlockCount = 0;
+            encoded: Uint8Array;
+            totalPulledBlockCount = 0;
+            isPulling = false;
+            get isStalling(): boolean {
+                return this._isStalling;
+            }
+            set isStalling(val: boolean) {
+                this._isStalling = val;
+                if (val) this.onceStalled = true;
+            }
+            private _isStalling = false;
+            onceStalled = false;
 
             // two blocks are stored in decoded buffer
-            private readonly decoded: Float32Array[];
-            private sampleOffset = 0;
-            private lastDecodedBlockIndex = -1;
+            decoded: Float32Array[];
+            sampleOffset = 0;
+            lastDecodedBlockIndex = -1;
 
-            constructor (options: AudioWorkletNodeOptions | undefined) {
-                super();
-
-                if (options == null || options.processorOptions == null) throw new Error();
-                const procOpts = options.processorOptions;
-
+            constructor(procOpts: HCAFramePlayerProcessorOptions) {
                 this.frame = new HCAFrame(new HCAInfo(procOpts.rawHeader));
                 const info = this.frame.Hca;
                 this.hasLoop = info.hasHeader["loop"] ? true : false;
@@ -2767,55 +2823,88 @@ if (typeof document === "undefined") {
                     {length: info.format.channelCount},
                     () => new Float32Array(HCAFrame.SamplesPerFrame * 2)
                 );
+            }
+        }
+        class HCAFramePlayer extends AudioWorkletProcessor {
+            private shutdown = false;
 
-                this.port.onmessage = (ev: MessageEvent) => {
-                    // TODO pause playing & set audioworklet to play new source
-                    if (typeof ev.data === "string") switch (ev.data) {
-                        case "shutdown":
-                            this.shutdown = true;
+            private params: HCAFramePlayerParams;
+
+            private readonly taskQueue: HCATaskQueue;
+
+            constructor (options: AudioWorkletNodeOptions | undefined) {
+                super();
+
+                if (options == null || options.processorOptions == null) throw new Error();
+                this.params = new HCAFramePlayerParams(options.processorOptions);
+
+                this.taskQueue = new HCATaskQueue("Background-HCAFramePlayer",
+                    (ev: MessageEvent, trans: Transferable[]) => this.port.postMessage(ev, trans),
+                    async (task: HCATask) => {
+                        switch (task.cmd) {
+                            case "nop":
+                                return;
+                            case "reset":
+                                this.params.abandoned = true;
+                                await new Promise((resolve) => this.params.abandonDoneCallback = resolve);
+                                break;
+                            case "shutdown":
+                                this.shutdown = true;
+                                break;
+                            case "initialize":
+                                this.params = new HCAFramePlayerParams(task.args[0]);
+                                break;
+                            default:
+                                throw new Error(`unknown cmd ${task.cmd}`);
+                        }
+                    },
+                    () => {} // cannot destroy the caller/controller, which is the foreground main thread
+                );
+                this.taskQueue.configTransfer(true, false);
+                this.port.onmessage = (ev: MessageEvent) => this.taskQueue.msgHandler(ev);
+            }
+
+            private handleNewBlocks(newBlocks: Uint8Array): void {
+                const info = this.params.frame.Hca;
+                const hasLoop = this.params.hasLoop;
+                const pullBlockCount = this.params.pullBlockCount;
+                const encoded = this.params.encoded;
+                if (newBlocks.length % info.blockSize != 0) {
+                    throw new Error(`newBlocks.length=${newBlocks.length} should be multiple of blockSize`);
+                }
+                const newBlockCount = newBlocks.length / info.blockSize;
+                const expected = info.blockSize * pullBlockCount;
+                if (hasLoop) {
+                    let encodedOffset = info.blockSize * this.params.totalPulledBlockCount;
+                    if (encodedOffset + newBlocks.length > encoded.length) {
+                        throw new Error(`has loop header, buffer will overflow`);
+                    }
+                    encoded.set(newBlocks, encodedOffset);
+                } else {
+                    if (newBlocks.length != expected) {
+                        throw new Error(`no loop header, newBlocks.length (${newBlocks.length}) != expected (${expected})`);
+                    }
+                    switch (this.params.totalPulledBlockCount % (pullBlockCount * 2)) {
+                        case 0:
+                            encoded.set(newBlocks);
                             break;
-                    } else try {
-                        const newBlocks: Uint8Array = ev.data;
-                        if (newBlocks.length % info.blockSize != 0) {
-                            throw new Error(`newBlocks.length=${newBlocks.length} should be multiple of blockSize`);
-                        }
-                        const newBlockCount = newBlocks.length / info.blockSize;
-                        const expected = info.blockSize * this.pullBlockCount;
-                        if (this.hasLoop) {
-                            let encodedOffset = info.blockSize * this.totalPulledBlockCount;
-                            if (encodedOffset + newBlocks.length > this.encoded.length) {
-                                throw new Error(`has loop header, buffer will overflow`);
-                            }
-                            this.encoded.set(newBlocks, encodedOffset);
-                        } else {
-                            if (newBlocks.length != expected) {
-                                throw new Error(`no loop header, newBlocks.length (${newBlocks.length}) != expected (${expected})`);
-                            }
-                            switch (this.totalPulledBlockCount % (this.pullBlockCount * 2)) {
-                                case 0:
-                                    this.encoded.set(newBlocks);
-                                    break;
-                                case this.pullBlockCount:
-                                    this.encoded.set(newBlocks, expected);
-                                    break;
-                                default:
-                                    throw new Error();
-                            }
-                        }
-                        this.totalPulledBlockCount += newBlockCount;
-                        this.isPulling = false;
-                    } catch (e) {
-                        this.hasError = true;
-                        console.error(e);
+                        case pullBlockCount:
+                            encoded.set(newBlocks, expected);
+                            break;
+                        default:
+                            throw new Error();
                     }
                 }
+                this.params.totalPulledBlockCount += newBlockCount;
+                this.params.isPulling = false;
             }
 
             private writeToDecodedBuffer(frame: HCAFrame): void {
                 const halfSize = HCAFrame.SamplesPerFrame;
+                const decoded = this.params.decoded;
                 for (let c = 0; c < frame.Channels.length; c++) {
-                    const firstHalf = this.decoded[c].subarray(0, halfSize);
-                    const lastHalf = this.decoded[c].subarray(halfSize, halfSize * 2);
+                    const firstHalf = decoded[c].subarray(0, halfSize);
+                    const lastHalf = decoded[c].subarray(halfSize, halfSize * 2);
                     firstHalf.set(lastHalf);
                     for (let sf = 0, offset = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
                         lastHalf.set(frame.Channels[c].PcmFloat[sf], offset);
@@ -2829,11 +2918,12 @@ if (typeof document === "undefined") {
             }
 
             private mapToUnLooped(sampleOffset: number): number {
-                const info = this.frame.Hca;
+                const info = this.params.frame.Hca;
+                const hasLoop = this.params.hasLoop;
                 if (sampleOffset <= info.endAtSample) {
                     return sampleOffset;
                 } else {
-                    if (this.hasLoop) {
+                    if (hasLoop) {
                         let offset = (sampleOffset - info.loopStartAtSample) % info.loopSampleCount;
                         return info.loopStartAtSample + offset;
                     } else {
@@ -2843,98 +2933,105 @@ if (typeof document === "undefined") {
             }
 
             process(inputs: Float32Array[][], outputs: Float32Array[][], parameters: AudioWorkletNodeOptions) {
-                if (this.shutdown || this.hasError) {
-                    this.port.postMessage("error");
+                if (this.shutdown) {
                     this.port.close();
                     return false;
-                } else if (this.isEnd) {
+                } else if (this.params.abandoned) {
+                    const resolve = this.params.abandonDoneCallback;
+                    if (typeof resolve === "function") {
+                        resolve();
+                        delete this.params.abandonDoneCallback;
+                    }
+                    return true; // wait for new source
+                }
+
+                const output = outputs[0];
+                const renderQuantumSize = output[0].length;
+                const samplesPerBlock = HCAFrame.SamplesPerFrame;
+                // no more than one block will be decoded each time this function being called,
+                // therefore one block must cover the whole renderQuantumSize
+                if (samplesPerBlock < renderQuantumSize)
+                    throw new Error("render quantum requires more sample than a full block");
+                const info = this.params.frame.Hca;
+                const hasLoop = this.params.hasLoop;
+                const encoded = this.params.encoded;
+                const decoded = this.params.decoded;
+                // skip droppedHeader
+                if (this.params.sampleOffset < info.format.droppedHeader) {
+                    this.params.sampleOffset = info.format.droppedHeader;
+                }
+                if (!hasLoop && this.params.sampleOffset >= info.endAtSample) {
+                    // nothing more to play
+                    this.taskQueue.sendCmd("end", []);
+                    this.params.abandoned = true;
                     return true;
                 }
-                try {
-                    const output = outputs[0];
-                    const renderQuantumSize = output[0].length;
-                    const samplesPerBlock = HCAFrame.SamplesPerFrame;
-                    // no more than one block will be decoded each time this function being called,
-                    // therefore one block must cover the whole renderQuantumSize
-                    if (samplesPerBlock < renderQuantumSize)
-                        throw new Error("render quantum requires more sample than a full block");
-                    const info = this.frame.Hca;
-
-                    // skip droppedHeader
-                    if (this.sampleOffset < info.format.droppedHeader) {
-                        this.sampleOffset = info.format.droppedHeader;
-                    }
-
-                    if (!this.hasLoop && this.sampleOffset >= info.endAtSample) {
-                        // nothing more to play
-                        this.port.postMessage("end");
-                        this.isEnd = true;
-                        return true;
-                    }
-
-                    // decode block & pull new block (if needed)
-                    const mappedStartOffset = this.mapToUnLooped(this.sampleOffset);
-                    const mappedEndOffset = this.mapToUnLooped(this.sampleOffset + renderQuantumSize);
-                    const inBlockStartOffset = mappedStartOffset % samplesPerBlock;
-                    const inBlockEndOffset = mappedEndOffset % samplesPerBlock;
-                    const startBlockIndex = (mappedStartOffset - inBlockStartOffset) / samplesPerBlock;
-                    const endBlockIndex = (mappedEndOffset - inBlockEndOffset) / samplesPerBlock;
-                    if (endBlockIndex != this.lastDecodedBlockIndex) {
-                        if (endBlockIndex < this.totalPulledBlockCount) {
-                            // block is available for decoding
-                            let start = info.blockSize * (this.hasLoop
-                                ? endBlockIndex
-                                : endBlockIndex % (this.pullBlockCount * 2));
-                            let end = start + info.blockSize;
-                            if (end > this.encoded.length) throw new Error("block end offset exceeds buffer size");
-                            HCA.decodeBlock(this.frame, this.encoded.subarray(start, end));
-                            this.writeToDecodedBuffer(this.frame);
-                            this.lastDecodedBlockIndex = endBlockIndex;
-                            if (this.totalPulledBlockCount < (this.hasLoop ? info.loop.end : info.format.blockCount)) {
-                                // pull blocks in advance
-                                let availableBlockCount = this.hasLoop && this.totalPulledBlockCount >= info.loop.end + 1
-                                    ? "all_pulled"
-                                    : this.totalPulledBlockCount - (this.lastDecodedBlockIndex + 1);
-                                if (typeof availableBlockCount === 'number' && availableBlockCount < this.pullBlockCount) {
-                                    if (!this.isPulling) {
-                                        // request to pull & continue decoding
-                                        this.port.postMessage("pull");
-                                        this.isPulling = true;
-                                    }
+                // decode block & pull new block (if needed)
+                const mappedStartOffset = this.mapToUnLooped(this.params.sampleOffset);
+                const mappedEndOffset = this.mapToUnLooped(this.params.sampleOffset + renderQuantumSize);
+                const inBlockStartOffset = mappedStartOffset % samplesPerBlock;
+                const inBlockEndOffset = mappedEndOffset % samplesPerBlock;
+                const startBlockIndex = (mappedStartOffset - inBlockStartOffset) / samplesPerBlock;
+                const endBlockIndex = (mappedEndOffset - inBlockEndOffset) / samplesPerBlock;
+                if (endBlockIndex != this.params.lastDecodedBlockIndex) {
+                    if (endBlockIndex < this.params.totalPulledBlockCount) {
+                        // block is available for decoding
+                        this.params.isStalling = false;
+                        let start = info.blockSize * (hasLoop
+                            ? endBlockIndex
+                            : endBlockIndex % (this.params.pullBlockCount * 2));
+                        let end = start + info.blockSize;
+                        if (end > encoded.length) throw new Error("block end offset exceeds buffer size");
+                        HCA.decodeBlock(this.params.frame, encoded.subarray(start, end));
+                        this.writeToDecodedBuffer(this.params.frame);
+                        this.params.lastDecodedBlockIndex = endBlockIndex;
+                        if (this.params.totalPulledBlockCount < (hasLoop ? info.loop.end : info.format.blockCount)) {
+                            // pull blocks in advance
+                            let availableBlockCount = hasLoop && this.params.totalPulledBlockCount >= info.loop.end + 1
+                                ? "all_pulled"
+                                : this.params.totalPulledBlockCount - (this.params.lastDecodedBlockIndex + 1);
+                            if (typeof availableBlockCount === 'number' && availableBlockCount < this.params.pullBlockCount) {
+                                if (!this.params.isPulling) {
+                                    // request to pull & continue decoding
+                                    this.taskQueue.execCmd("pull", [], (blocks: Uint8Array) => this.handleNewBlocks(blocks));
+                                    this.params.isPulling = true;
                                 }
                             }
-                        } else {
-                            // block is unavailable
-                            if (!this.isPulling) {
-                                // pull & wait until available
-                                this.port.postMessage("pull");
-                                this.isPulling = true;
-                            }
-                            return true;
                         }
+                    } else {
+                        // block is unavailable
+                        if (!this.params.isStalling && this.params.onceStalled) {
+                            // print error about stalling
+                            console.warn(`[HCAFramePlayer] waiting until block ${endBlockIndex} become available...`);
+                        }
+                        this.params.isStalling = true;
+                        if (!this.params.isPulling) {
+                            // moved printing error about stalling to above
+                            // it may always be pulling, which can probably explain why it didn't print
+                            // pull & wait until available
+                            this.taskQueue.execCmd("pull", [], (blocks: Uint8Array) => this.handleNewBlocks(blocks));
+                            this.params.isPulling = true;
+                        }
+                        return true;
                     }
-
-                    // copy decoded data
-                    if (output.length != info.format.channelCount) throw new Error("channel count mismatch");
-                    const inBufferStartOffset = (endBlockIndex != startBlockIndex ? 0 : samplesPerBlock) + inBlockStartOffset;
-                    const inBufferEndOffset = samplesPerBlock + inBlockEndOffset;
-                    const inBufferSrcSize = inBufferEndOffset - inBufferStartOffset;
-                    if (inBufferSrcSize <= 0) throw new Error("size in decoded buffer should be positive");
-                    const copySize = Math.min(inBufferSrcSize, renderQuantumSize);
-                    for (let channel = 0; channel < output.length; channel++) {
-                        let src = this.decoded[channel].subarray(inBufferStartOffset, inBufferStartOffset + copySize);
-                        output[channel].set(src);
-                    }
-                    this.sampleOffset += copySize;
-                    if (this.hasLoop && this.sampleOffset > info.endAtSample) {
-                        // it's possible for sampleOffset to overflow because loop is infinite
-                        // rewinding it back to prevent overflow
-                        // (however, Number.MAX_SAFE_INTEGER seems to be able to handle about 64.7 centuries under 44.1kHz)
-                        this.sampleOffset = this.mapToUnLooped(this.sampleOffset);
-                    }
-                } catch (e) {
-                    this.hasError = true;
-                    console.error(e);
+                }
+                // copy decoded data
+                if (output.length != info.format.channelCount) throw new Error("channel count mismatch");
+                const inBufferStartOffset = (endBlockIndex != startBlockIndex ? 0 : samplesPerBlock) + inBlockStartOffset;
+                const inBufferEndOffset = samplesPerBlock + inBlockEndOffset;
+                const inBufferSrcSize = inBufferEndOffset - inBufferStartOffset;
+                if (inBufferSrcSize <= 0) throw new Error("size in decoded buffer should be positive");
+                const copySize = Math.min(inBufferSrcSize, renderQuantumSize);
+                for (let channel = 0; channel < output.length; channel++) {
+                    let src = decoded[channel].subarray(inBufferStartOffset, inBufferStartOffset + copySize);
+                    output[channel].set(src);
+                }
+                this.params.sampleOffset += copySize;
+                if (hasLoop && this.params.sampleOffset > info.endAtSample) {
+                    // it's possible for sampleOffset to overflow because loop is infinite
+                    // rewinding it back to prevent overflow
+                    // (however, Number.MAX_SAFE_INTEGER seems to be able to handle about 64.7 centuries under 44.1kHz)
+                    this.params.sampleOffset = this.mapToUnLooped(this.params.sampleOffset);
                 }
                 return true;
             }
@@ -2942,9 +3039,9 @@ if (typeof document === "undefined") {
         registerProcessor("hca-frame-player", HCAFramePlayer);
     } else {
         // Web Worker
-        onmessage = function (msg: MessageEvent) {
-            const task = HCATask.recreate(msg.data);
-            function handleMsg() {
+        const taskQueue = new HCATaskQueue("Background-HCAWorker",
+            (msg: MessageEvent, trans: Transferable[]) => (postMessage as any)(msg, trans),
+            (task: HCATask) => {
                 switch (task.cmd) {
                     case "nop":
                         return;
@@ -2961,36 +3058,20 @@ if (typeof document === "undefined") {
                     case "decode":
                         return HCA.decode.apply(HCA, task.args);
                     default:
-                        throw new Error("unknown cmd");
+                        throw new Error(`unknown cmd ${task.cmd}`);
                 }
-            }
-            // it's observed that Firefox refuses to postMessage an Error object:
-            // "DataCloneError: The object could not be cloned."
-            // (observed in Firefox 97, not clear about other versions)
-            // Chrome doesn't seem to have this problem,
-            // however, in order to keep compatible with Firefox,
-            // we still have to avoid posting an Error object
-            try {
-                task.result = handleMsg();
-            } catch (e) {
-                console.error(e);
-                task.errMsg = "error during Worker executing cmd";
-                if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
-            }
-            try {
-                (this as any).postMessage(task, task.transferList);
-            } catch (e) {
-                console.error(e);
-                task.errMsg = (task.errMsg == null ? "" : task.errMsg + "\n\n") + "postMessage from Worker failed";
-                if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
-            }
-        }
+            },
+            () => {} // cannot destroy the caller/controller, which is the foreground main thread
+        );
+        onmessage = (ev: MessageEvent) => taskQueue.msgHandler(ev);
     }
 }
 
 // create & control audio worklet
 class HCAAudioWorkletHCAPlayer {
-    private isAlive = true;
+    get isAlive(): boolean {
+        return this.taskQueue.isAlive;
+    }
     private isPlaying = false;
 
     private source?: Uint8Array | ReadableStreamDefaultReader<Uint8Array>;
@@ -3031,86 +3112,70 @@ class HCAAudioWorkletHCAPlayer {
     private readonly hcaPlayerNode: AudioWorkletNode;
     private readonly gainNode: GainNode;
 
-    private async msgHandler(ev: MessageEvent): Promise<void> {
-        try {
-            if (typeof ev.data === "string") switch (ev.data) {
-                case "error":
-                    throw new Error("AudioWorklet encountered an error");
-                case "end":
+    private readonly taskQueue: HCATaskQueue;
+
+    private async taskHandler(task: HCATask): Promise<Uint8Array | undefined> {
+        switch (task.cmd) {
+            case "nop":
+                return;
+            case "end":
+                await this.pause();
+                return;
+            case "pull":
+                if (this.source == null) {
+                    console.error(`nothing to feed`);
+                    await this.taskQueue.execCmd("reset", []);
                     await this.pause();
                     return;
-                case "pull":
-                    if (this.source == null) {
-                        console.error("nothing to feed");
-                        this.pause();
-                        return;
+                }
+                let blockCount = Math.min(this.feedBlockCount, this.remainingBlockCount);
+                let size = this.info.blockSize * blockCount;
+                let newBlocks: Uint8Array;
+                if (this.source instanceof Uint8Array) {
+                    // whole HCA mode
+                    let start = this.info.dataOffset + this.info.blockSize * this.totalFedBlockCount;
+                    let end = start + size;
+                    newBlocks = this.source.subarray(start, end);
+                //} else if (this.source instanceof ReadableStreamDefaultReader) {
+                // commented out because Firefox throws "ReferenceError: ReadableStreamDefaultReader is not defined"
+                } else {
+                    // URL mode
+                    if (this.srcBuf == null) throw new Error("srcBuf is undefined");
+                    let maxDownlaodSize = this.info.blockSize * this.remainingBlockCount;
+                    let downloadSize = Math.max(this.downloadBufferSize, size);
+                    downloadSize = Math.min(downloadSize, maxDownlaodSize);
+                    let remaining = downloadSize - this.srcBuf.length;
+                    if (remaining > 0) {
+                        this.srcBuf = await HCAAudioWorkletHCAPlayer.readAndAppend(this.source, this.srcBuf, remaining);
                     }
-                    let blockCount = Math.min(this.feedBlockCount, this.remainingBlockCount);
-                    let size = this.info.blockSize * blockCount;
-                    let newBlocks: Uint8Array;
-                    if (this.source instanceof Uint8Array) {
-                        // whole HCA mode
-                        let start = this.info.dataOffset + this.info.blockSize * this.totalFedBlockCount;
-                        let end = start + size;
-                        newBlocks = this.source.subarray(start, end);
-                    //} else if (this.source instanceof ReadableStreamDefaultReader) {
-                    // commented out because Firefox throws "ReferenceError: ReadableStreamDefaultReader is not defined"
-                    } else {
-                        // URL mode
-                        if (this.srcBuf == null) throw new Error("srcBuf is undefined");
-                        let maxDownlaodSize = this.info.blockSize * this.remainingBlockCount;
-                        let downloadSize = Math.max(this.downloadBufferSize, size);
-                        downloadSize = Math.min(downloadSize, maxDownlaodSize);
-                        let remaining = downloadSize - this.srcBuf.length;
-                        if (remaining > 0) {
-                            this.srcBuf = await HCAAudioWorkletHCAPlayer.readAndAppend(this.source, this.srcBuf, remaining);
-                        }
-                        if (this.srcBuf.length < size) throw new Error("srcBuf still smaller than expected");
-                        newBlocks = this.srcBuf.subarray(0, size);
-                        this.srcBuf = this.srcBuf.slice(size);
-                    }
-                    for (let i = 0, start = 0; i < blockCount; i++, start += this.info.blockSize) {
-                        let block = newBlocks.subarray(start, start + this.info.blockSize);
-                        // verify checksum (if enabled)
-                        // will throw & stop playing on mismatch!
-                        if (this.verifyCsum) HCACrc16.verify(block, this.info.blockSize - 2);
-                        // decrypt (if encrypted)
-                        if (this.cipher != null) this.cipher.mask(block, 0, this.info.blockSize - 2);
-                        // fix checksum
-                        HCACrc16.fix(block, this.info.blockSize - 2);
-                    }
-                    if (this.hasLoop) {
-                        // just copy, no need to enlarge
-                        newBlocks = newBlocks.slice();
-                    } else {
-                        // enlarge & copy
-                        let data = newBlocks;
-                        newBlocks = new Uint8Array(this.feedSize);
-                        newBlocks.set(data);
-                    }
-                    this.hcaPlayerNode.port.postMessage(newBlocks);
-                    this.totalFedBlockCount += blockCount;
-                    break;
-                case "done":
-                    if (this.callbacks == null) throw new Error("resolveFunc is null");
-                    this.callbacks.resolve();
-                    this.callbacks = undefined;
-                    break;
-            }
-        } catch (e) {
-            console.error(e);
-            if (this.callbacks != null) try {
-                this.callbacks.reject();
-                this.callbacks = undefined;
-            } catch (e) {
-                console.error(e);
-            }
-            this.destroy();
+                    if (this.srcBuf.length < size) throw new Error("srcBuf still smaller than expected");
+                    newBlocks = this.srcBuf.subarray(0, size);
+                    this.srcBuf = this.srcBuf.slice(size);
+                }
+                for (let i = 0, start = 0; i < blockCount; i++, start += this.info.blockSize) {
+                    let block = newBlocks.subarray(start, start + this.info.blockSize);
+                    // verify checksum (if enabled)
+                    // will throw & stop playing on mismatch!
+                    if (this.verifyCsum) HCACrc16.verify(block, this.info.blockSize - 2);
+                    // decrypt (if encrypted)
+                    if (this.cipher != null) this.cipher.mask(block, 0, this.info.blockSize - 2);
+                    // fix checksum
+                    HCACrc16.fix(block, this.info.blockSize - 2);
+                }
+                if (this.hasLoop) {
+                    // just copy, no need to enlarge
+                    newBlocks = newBlocks.slice();
+                } else {
+                    // enlarge & copy
+                    let data = newBlocks;
+                    newBlocks = new Uint8Array(this.feedSize);
+                    newBlocks.set(data);
+                }
+                this.totalFedBlockCount += blockCount;
+                return newBlocks;
+            default:
+                throw new Error(`unknown cmd "${task.cmd}"`);
         }
-    }
-    private callbacks?: {
-        resolve: Function,
-        reject: Function,
     }
 
     static async create(selfUrl: URL, source: Uint8Array | URL, feedByteMax = 32768): Promise<HCAAudioWorkletHCAPlayer> {
@@ -3124,8 +3189,7 @@ class HCAAudioWorkletHCAPlayer {
         if (source instanceof Uint8Array) {
             actualSource = source;
             info = new HCAInfo(source);
-        }
-        else if (source instanceof URL) {
+        } else if (source instanceof URL) {
             const fetched = await this.getHCAInfoFromURL(source);
             actualSource = fetched.reader;
             info = fetched.info;
@@ -3166,12 +3230,31 @@ class HCAAudioWorkletHCAPlayer {
             console.error("already died");
             return;
         }
-        this.hcaPlayerNode.port.postMessage("shutdown");
-        this.hcaPlayerNode.port.close();
-        this.hcaPlayerNode.disconnect();
-        this.gainNode.disconnect();
-        await this.audioCtx.close();
-        this.isAlive = false;
+        try {
+            this.taskQueue.sendCmd("shutdown", []); // not waiting for result
+        } catch (e) {
+            console.error(`cannot send shutdown cmd`);
+        }
+        try {
+            this.hcaPlayerNode.port.close();
+        } catch (e) {
+            console.error(`cannot close message port`);
+        }
+        try {
+            this.hcaPlayerNode.disconnect();
+        } catch (e) {
+            console.error(`cannot disconnect hcaPlayerNode`);
+        }
+        try {
+            this.gainNode.disconnect();
+        } catch (e) {
+            console.error(`cannot disconnect gainNode`);
+        }
+        try {
+            await this.audioCtx.close();
+        } catch (e) {
+            console.error(`cannot close audio context`);
+        }
     }
 
     constructor(selfUrl: URL, audioCtx: AudioContext, hcaPlayerNode: AudioWorkletNode, gainNode: GainNode, feedBlockCount: number,
@@ -3179,7 +3262,13 @@ class HCAAudioWorkletHCAPlayer {
     {
         this.selfUrl = selfUrl;
         this.audioCtx = audioCtx;
-        hcaPlayerNode.port.onmessage = (ev) => this.msgHandler(ev);
+        this.taskQueue = new HCATaskQueue("Main-HCAAudioWorkletHCAPlayer",
+            (msg: MessageEvent, trans: Transferable[]) => hcaPlayerNode.port.postMessage(msg, trans),
+            (task: HCATask) => this.taskHandler(task),
+            () => this.destroy());
+        hcaPlayerNode.port.onmessage = (ev) => this.taskQueue.msgHandler(ev);
+        hcaPlayerNode.port.onmessageerror = (ev) => this.taskQueue.errHandler(ev);
+        hcaPlayerNode.onprocessorerror = (ev) => this.taskQueue.errHandler(ev);
         this.hcaPlayerNode = hcaPlayerNode;
         this.gainNode = gainNode;
         this.feedBlockCount = feedBlockCount;
@@ -3269,10 +3358,15 @@ class HCAAudioWorkletHCAPlayer {
             newSource = source;
             newInfo = new HCAInfo(source);
         } else if (source instanceof URL) {
-            const result = await HCAAudioWorkletHCAPlayer.getHCAInfoFromURL(source);
-            newSource = result.reader;
-            newInfo = result.info;
-            newBuffer = result.buffer;
+            await this.taskQueue.execCmd("reset", []); // abandon previous source
+            try {
+                const result = await HCAAudioWorkletHCAPlayer.getHCAInfoFromURL(source);
+                newSource = result.reader;
+                newInfo = result.info;
+                newBuffer = result.buffer;
+            } catch (e) {
+                throw e;
+            }
         } else throw new Error("invalid source");
 
         // sample rate and channel count is immutable,
@@ -3285,11 +3379,12 @@ class HCAAudioWorkletHCAPlayer {
         if (newInfo.format.channelCount != this.channelCount)
             throw new Error("channel count mismatch");
 
-        // TODO pause playing & set audioworklet to play new source
-        await new Promise((res, rej) => {
-            this.callbacks = {resolve: res, reject: rej};
-            this.hcaPlayerNode.port.postMessage({rawHeader: newInfo.getRawHeader()});
-        });
+        const processorOptions = {
+            rawHeader: newInfo.getRawHeader(),
+            pullBlockCount: this.feedBlockCount,
+        };
+        await this.taskQueue.execCmd("initialize", [processorOptions]);
+        this.totalFedBlockCount = 0;
         this.info = newInfo;
         this.source = newSource;
         this.srcBuf = newBuffer;
@@ -3308,9 +3403,9 @@ class HCAAudioWorkletHCAPlayer {
     async pause(): Promise<void> {
         if (!this.isAlive) throw new Error("dead");
         if (!this.isPlaying) return;
-        await this.audioCtx.suspend();
         this.hcaPlayerNode.disconnect();
         this.gainNode.disconnect();
+        await this.audioCtx.suspend();
         this.isPlaying = false;
     }
 }
@@ -3346,8 +3441,10 @@ class HCAWorker {
         else if (typeof selfUrl === "string") this.selfUrl = new URL(selfUrl, document.baseURI);
         else throw new Error("selfUrl must be either string or URL");
         this.hcaWorker = new Worker(this.selfUrl);
-        this.taskQueue = new HCATaskQueue((msg: any, trans: Transferable[]) => this.hcaWorker.postMessage(msg, trans),
-            () => this.hcaWorker.terminate);
+        this.taskQueue = new HCATaskQueue("Main-HCAWorker",
+            (msg: any, trans: Transferable[]) => this.hcaWorker.postMessage(msg, trans),
+            () => {},
+            () => this.hcaWorker.terminate());
         this.hcaWorker.onmessage = (msg) => this.taskQueue.msgHandler(msg);
         this.hcaWorker.onerror = (msg) => this.taskQueue.errHandler(msg);
         this.hcaWorker.onmessageerror = (msg) => this.taskQueue.errHandler(msg);
