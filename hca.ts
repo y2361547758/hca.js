@@ -2604,18 +2604,18 @@ class HCATaskQueue {
     // not sending the arguments back is supposed to save a little time/overhead
     private replyArgs = false;
 
-    private readonly postMessage: Function;
-    private readonly taskHandler: Function;
-    private readonly destroy: Function;
+    private readonly postMessage: (msg: any, transfer: Transferable[]) => void;
+    private readonly taskHandler: (task: HCATask) => void;
+    private readonly destroy: () => void;
     private queue: HCATask[] = [];
     private lastTaskID = 0;
-    private callbacks: Record<number, {resolve: Function, reject: Function}> = {};
+    private callbacks: Record<number, {resolve: (result?: any) => void, reject: (reason?: any) => void}> = {};
     private static readonly discardReplyTaskID = -1;
 
     private sendTask(task: HCATask): void {
         if (task.origin !== this.origin) throw new Error("the task to be sent must have the same origin as the task queue");
         if (this.transferArgs) this.postMessage(task, task.transferList);
-        else this.postMessage(task);
+        else this.postMessage(task, []);
     }
 
     private sendReply(task: HCATask): void {
@@ -2633,7 +2633,10 @@ class HCATaskQueue {
         }
     }
 
-    constructor (origin: string, postMessage: Function, taskHandler: Function, destroy: Function) {
+    constructor (origin: string,
+        postMessage: (msg: any, transfer: Transferable[]) => void, taskHandler: (task: HCATask) => void,
+        destroy: () => void)
+    {
         this.origin = origin;
         this.postMessage = postMessage;
         this.taskHandler = taskHandler;
@@ -2737,7 +2740,7 @@ class HCATaskQueue {
         });
     }
 
-    async execCmd(cmd: string, args: any[], resolveHook?: Function): Promise<any> {
+    async execCmd(cmd: string, args: any[], resolveHook?: (result: any) => any): Promise<any> {
         if (!this._isAlive) throw new Error("dead");
         return await new Promise((resolve, reject) => {
             // assign new taskID
@@ -2840,7 +2843,7 @@ if (typeof document === "undefined") {
                 this.ctx = new HCAFramePlayerContext(options.processorOptions);
 
                 this.taskQueue = new HCATaskQueue("Background-HCAFramePlayer",
-                    (ev: MessageEvent, trans: Transferable[]) => this.port.postMessage(ev, trans),
+                    (msg: any, trans: Transferable[]) => this.port.postMessage(msg, trans),
                     async (task: HCATask) => {
                         switch (task.cmd) {
                             case "nop":
@@ -3030,7 +3033,7 @@ if (typeof document === "undefined") {
     } else {
         // Web Worker
         const taskQueue = new HCATaskQueue("Background-HCAWorker",
-            (msg: MessageEvent, trans: Transferable[]) => (postMessage as any)(msg, trans),
+            (msg: any, trans: Transferable[]) => (postMessage as any)(msg, trans),
             (task: HCATask) => {
                 switch (task.cmd) {
                     case "nop":
@@ -3251,7 +3254,7 @@ class HCAAudioWorkletHCAPlayer {
         this.selfUrl = selfUrl;
         this.audioCtx = audioCtx;
         this.taskQueue = new HCATaskQueue("Main-HCAAudioWorkletHCAPlayer",
-            (msg: MessageEvent, trans: Transferable[]) => hcaPlayerNode.port.postMessage(msg, trans),
+            (msg: any, trans: Transferable[]) => hcaPlayerNode.port.postMessage(msg, trans),
             (task: HCATask) => this.taskHandler(task),
             () => this.destroy());
         hcaPlayerNode.port.onmessage = (ev) => this.taskQueue.msgHandler(ev);
