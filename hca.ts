@@ -2685,7 +2685,7 @@ class HCATaskQueue {
 
                 // settle promise
                 try {
-                    callback(task.hasErr ? task.errMsg : task.result);
+                    await callback(task.hasErr ? task.errMsg : task.result);
                 } catch (e) {
                     console.error(`${this.origin}`, e);
                 }
@@ -2746,7 +2746,7 @@ class HCATaskQueue {
             // register callback
             if (this.callbacks[taskID] != null) throw new Error(`callback ${taskID} already registered`);
             const hookedResolve = resolveHook != null
-                ? (result: any) => resolve(resolveHook(result))
+                ? async (result: any) => resolve(await resolveHook(result))
                 : (result: any) => resolve(result);
             this.callbacks[taskID] = {resolve: hookedResolve, reject: reject};
             // append to command queue
