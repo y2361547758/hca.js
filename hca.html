@@ -25,6 +25,10 @@
     <button id="awplaywholehcabtn">Play</button><br>
     Play directly from the URL above, without fully downloading the whole file:<br>
     <button id="awplayfromurlbtn">Play</button><br>
+    Progress control:<br>
+    <button id="awpausebtn">Pause</button><br>
+    <button id="awresumebtn">Resume</button><br>
+    <button id="awstopbtn">Stop</button><br>
     <hr>
     <h3>Decode the whole file</h3>
     Decoding mode: <input type="number" step="8" min="0" max="32" placeholder="0-99" id="decodingmodeinput" value="16"><br>
@@ -470,7 +474,50 @@
                 // let the button bounce
                 self.disabled = false;
                 // next step
-                // TODO pause/rewind/fast-forward etc
+                buttons.awpausebtn = true;
+                buttons.awresumebtn = false;
+                buttons.awstopbtn = true;
+                // TODO rewind/fast-forward etc
+            },
+            awpausebtn: async (self) => {
+                try {
+                    await worker.pausePlaying();
+                    self.textContent = "Paused";
+                } catch (e) {
+                    self.textContent = "Pause (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.awresumebtn = true;
+            },
+            awresumebtn: async (self) => {
+                try {
+                    await worker.resumePlaying();
+                    self.textContent = "Resumed";
+                } catch (e) {
+                    self.textContent = "Resume (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.awpausebtn = true;
+            },
+            awstopbtn: async (self) => {
+                try {
+                    await worker.stopPlaying();
+                    self.textContent = "Stopped";
+                } catch (e) {
+                    self.textContent = "Stop (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.awpausebtn = false;
+                buttons.awresumebtn = false;
             },
             infobtn: async (self) => {
                 let hca = hcaFileData[
