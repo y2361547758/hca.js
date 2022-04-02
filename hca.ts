@@ -3248,7 +3248,7 @@ class HCAAudioWorkletHCAPlayer {
         }
     }
 
-    constructor(selfUrl: URL, audioCtx: AudioContext, hcaPlayerNode: AudioWorkletNode, gainNode: GainNode, feedBlockCount: number,
+    private constructor(selfUrl: URL, audioCtx: AudioContext, hcaPlayerNode: AudioWorkletNode, gainNode: GainNode, feedBlockCount: number,
         info: HCAInfo, source: Uint8Array | ReadableStreamDefaultReader<Uint8Array>, srcBuf?: Uint8Array)
     {
         this.selfUrl = selfUrl;
@@ -3321,7 +3321,7 @@ class HCAAudioWorkletHCAPlayer {
         info: HCAInfo,
         buffer: Uint8Array,
     }> {
-        // FIXME Firefox seems to download whole file before any readout
+        // FIXME send HTTP Range request to avoid blocking later requests (especially in Firefox)
         const resp = await fetch(url.href);
         if (resp.status != 200) throw new Error(`status ${resp.status}`);
         if (resp.body == null) throw new Error("response has no body");
@@ -3456,11 +3456,23 @@ class HCAWorker {
         console.log(`${text} took ${duration} ms`);
         return duration;
     }
-    constructor (selfUrl: URL | string) {
-        if (selfUrl instanceof URL) this.selfUrl = selfUrl;
-        else if (typeof selfUrl === "string") this.selfUrl = new URL(selfUrl, document.baseURI);
-        else throw new Error("selfUrl must be either string or URL");
-        this.hcaWorker = new Worker(this.selfUrl);
+    static async create(selfUrl: URL | string): Promise<HCAWorker> {
+        if (typeof selfUrl === "string") selfUrl = new URL(selfUrl, document.baseURI);
+        else if (!(selfUrl instanceof URL)) throw new Error("selfUrl must be either string or URL");
+        // fetch & save hca.js as blob in advance, to avoid creating worker being blocked later, like:
+        // (I observed this problem in Firefox)
+        // creating HCAAudioWorkletHCAPlayer requires information from HCA, which is sample rate and channel count;
+        // however, fetching HCA (originally supposed to be progressive/streamed) blocks later request to fetch hca.js,
+        // so that HCAAudioWorkletHCAPlayer can only be created after finishing downloading the whole HCA,
+        // which obviously defeats the purpose of streaming HCA
+        const response = await fetch(selfUrl.href);
+        const blob = await response.blob();
+        selfUrl = new URL(URL.createObjectURL(blob));
+        return new HCAWorker(selfUrl);
+    }
+    private constructor (selfUrl: URL) {
+        this.hcaWorker = new Worker(selfUrl);
+        this.selfUrl = selfUrl;
         this.taskQueue = new HCATaskQueue("Main-HCAWorker",
             (msg: any, trans: Transferable[]) => this.hcaWorker.postMessage(msg, trans),
             () => {},
