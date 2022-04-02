@@ -3622,7 +3622,10 @@ class HCAWorker {
         if (startPlaying) await this.awHcaPlayer.play();
     }
     async playHCAFromURL(url: URL | string, key1?: any, key2?: any, startPlaying = true): Promise<void> {
-        if (typeof url === "string") url = new URL(url, document.baseURI);
+        if (typeof url === "string") {
+            if (url === "") throw new Error("empty URL");
+            url = new URL(url, document.baseURI);
+        }
         if (this.awHcaPlayer == null) {
             this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, url);
         } else {
