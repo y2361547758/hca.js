@@ -2527,8 +2527,14 @@ class HCATransTypedArray {
     }
 }
 
-// wrapped structure for transferring command/result from/to workers
+interface HCATaskHook {
+    task?: (task: HCATask) => HCATask | Promise<HCATask> // called before sending cmd & execution
+    result?: (result?: any) => any | Promise<any>, // called after execution & receiving reply & reply has result
+    error?: (reason?: string) => string | undefined | Promise<string | undefined>, // same as above except it's for errMsg
+}
+
 class HCATask {
+    isDummy?: boolean;
     readonly origin: string;
     readonly taskID: number;
     readonly cmd: string;
@@ -2575,12 +2581,13 @@ class HCATask {
     private _result?: any;
     private _errMsg?: string;
     private readonly _replyArgs: boolean;
-    constructor (origin: string, taskID: number, cmd: string, args: any[] | undefined, replyArgs: boolean) {
+    constructor (origin: string, taskID: number, cmd: string, args: any[] | undefined, replyArgs: boolean, isDummy?: boolean) {
         this.origin = origin;
         this.taskID = taskID;
         this.cmd = cmd;
         this._args = args?.map((arg) => HCATransTypedArray.convert(arg, this.transferList));
         this._replyArgs = replyArgs;
+        if (isDummy != null && isDummy) this.isDummy = true;
     }
     static recreate(task: HCATask): HCATask {
         const recreated = new HCATask(task.origin, task.taskID, task.cmd, task._args, task._replyArgs);
@@ -2608,14 +2615,27 @@ class HCATaskQueue {
     private readonly taskHandler: (task: HCATask) => void;
     private readonly destroy: () => void;
     private queue: HCATask[] = [];
-    private lastTaskID = 0;
-    private callbacks: Record<number, {resolve: (result?: any) => void, reject: (reason?: any) => void}> = {};
+    private static readonly maxTaskID = 65535;
+    private _lastTaskID = 0;
+    private getNextTaskID(): number {
+        const max = HCATaskQueue.maxTaskID - 1;
+        if (this._lastTaskID < 0 || this._lastTaskID > max) throw new Error("lastTaskID out of range");
+        const start = this._lastTaskID + 1;
+        for (let i = start; i <= start + max; i++) {
+            const taskID = i % (max + 1);
+            if (this.callbacks[taskID] == null) return this._lastTaskID = taskID;
+        }
+        throw new Error("cannot find next taskID");
+    }
+    private callbacks: Record<number, {
+        resolve: (result?: any) => void, reject: (reason?: any) => void,
+        hook?: HCATaskHook,
+    }> = {};
     private static readonly discardReplyTaskID = -1;
 
     private sendTask(task: HCATask): void {
         if (task.origin !== this.origin) throw new Error("the task to be sent must have the same origin as the task queue");
-        if (this.transferArgs) this.postMessage(task, task.transferList);
-        else this.postMessage(task, []);
+        this.postMessage(task, this.transferArgs ? task.transferList : []);
     }
 
     private sendReply(task: HCATask): void {
@@ -2623,13 +2643,23 @@ class HCATaskQueue {
         this.postMessage(task, task.transferList); // always use transferring to send back arguments
     }
 
-    private sendNextTask(): void {
+    private async sendNextTask(): Promise<void> {
         const task = this.queue.shift();
         if (task == null) {
             this.isIdle = true;
         } else {
             this.isIdle = false;
-            this.sendTask(task);
+            if (task.isDummy) {
+                // not actually sending, use a fake reply
+                task.result = null;
+                this.msgHandler(new MessageEvent("message", {data: task})); // won't await
+            } else {
+                const registered = this.callbacks[task.taskID];
+                const taskHook = registered != null && registered.hook != null && registered.hook.task != null
+                    ? registered.hook.task
+                    : undefined;
+                this.sendTask(taskHook != null ? await taskHook(task) : task);
+            }
         }
     }
 
@@ -2677,24 +2707,27 @@ class HCATaskQueue {
                 }
             } else {
                 // receiving cmd result
-                // find callback
+                // find & unregister callback
                 const registered = this.callbacks[task.taskID];
-                const callback = task.hasErr
-                    ? registered.reject
-                    : task.hasResult
-                        ? registered.resolve
-                        : (() => {throw new Error("replied no result or error");})();
                 delete this.callbacks[task.taskID];
 
                 // settle promise
                 try {
-                    await callback(task.hasErr ? task.errMsg : task.result);
+                    if (task.hasErr) {
+                        const errorHook = registered.hook != null ? registered.hook.error : undefined;
+                        const errMsg = errorHook != null ? await errorHook(task.errMsg) : task.errMsg;
+                        registered.reject(errMsg);
+                    } else if (task.hasResult) {
+                        const resultHook = registered.hook != null ? registered.hook.result : undefined;
+                        const result = resultHook != null ? await resultHook(task.result) : task.result;
+                        registered.resolve(result);
+                    } else throw new Error(`task (taskID=${task.taskID} cmd=${task.cmd}) has neither error nor result`);
                 } catch (e) {
                     console.error(`${this.origin}`, e);
                 }
 
                 // start next task
-                this.sendNextTask();
+                await this.sendNextTask();
             }
         } catch (e) {
             // irrecoverable error
@@ -2730,32 +2763,57 @@ class HCATaskQueue {
 
     async getTransferConfig(): Promise<{transferArgs: boolean, replyArgs: boolean}> {
         if (!this._isAlive) throw new Error("dead");
-        return await this.execCmd("nop", [], () => ({transferArgs: this.transferArgs, replyArgs: this.replyArgs}));
+        return await this.execCmd("nop", [], {result: () => ({
+            transferArgs: this.transferArgs,
+            replyArgs: this.replyArgs
+        })});
     }
     async configTransfer(transferArgs: boolean, replyArgs: boolean): Promise<void> {
         if (!this._isAlive) throw new Error("dead");
-        return await this.execCmd("nop", [], () => {
+        return await this.execCmd("nop", [], {result: () => {
             this.transferArgs = transferArgs ? true : false;
             this.replyArgs = replyArgs ? true : false;
-        });
+        }});
     }
 
-    async execCmd(cmd: string, args: any[], resolveHook?: (result: any) => any): Promise<any> {
+    async execCmd(cmd: string, args: any[], hook?: HCATaskHook): Promise<any> {
+        // can be modified to simply wrap execMultiCmd but I just want to let it alone for no special reason
         if (!this._isAlive) throw new Error("dead");
-        return await new Promise((resolve, reject) => {
+        // assign new taskID
+        const taskID = this.getNextTaskID();
+        const task = new HCATask(this.origin, taskID, cmd, args, this.replyArgs);
+        // register callback
+        if (this.callbacks[taskID] != null) throw new Error(`taskID=${taskID} is already occupied`);
+        const resultPromise = new Promise((resolve, reject) => this.callbacks[taskID] = {resolve: resolve, reject: reject,
+            hook: hook});
+        // append to command queue
+        this.queue.push(task);
+        // start executing tasks
+        if (this.isIdle) await this.sendNextTask();
+        // return result
+        return await resultPromise;
+    }
+
+    async execMultiCmd(cmdList: {cmd: string, args: any[], hook?: HCATaskHook}[]): Promise<any[]> {
+        // the point is to ensure "atomicity" between cmds
+        if (!this._isAlive) throw new Error("dead");
+        let resultPromises: Promise<any>[] = [];
+        for (let i = 0; i < cmdList.length; i++) {
             // assign new taskID
-            const taskID = ++this.lastTaskID;
-            const task = new HCATask(this.origin, taskID, cmd, args, this.replyArgs);
+            const taskID = this.getNextTaskID();
+            const listItem = cmdList[i];
+            const task = new HCATask(this.origin, taskID, listItem.cmd, listItem.args, this.replyArgs);
             // register callback
-            if (this.callbacks[taskID] != null) throw new Error(`callback ${taskID} already registered`);
-            const hookedResolve = resolveHook != null
-                ? async (result: any) => resolve(await resolveHook(result))
-                : (result: any) => resolve(result);
-            this.callbacks[taskID] = {resolve: hookedResolve, reject: reject};
+            if (this.callbacks[taskID] != null) throw new Error(`taskID=${taskID} is already occupied`);
+            resultPromises.push(new Promise((resolve, reject) => this.callbacks[taskID] = {resolve: resolve, reject: reject,
+                hook: listItem.hook}));
             // append to command queue
             this.queue.push(task);
-            if (this.isIdle) this.sendNextTask();
-        });
+        }
+        // start executing tasks
+        if (this.isIdle) await this.sendNextTask();
+        // return results
+        return await Promise.all(resultPromises);
     }
 
     sendCmd(cmd: string, args: any[]): void {
@@ -2768,10 +2826,10 @@ class HCATaskQueue {
 
     async shutdown(): Promise<void> {
         if (this._isAlive) {
-            await this.execCmd("nop", [], () => {
+            await this.execCmd("nop", [], {result: () => {
                 this.destroy();
                 this._isAlive = false;
-            });
+            }});
         }
     }
 }
@@ -2833,6 +2891,7 @@ if (typeof document === "undefined") {
             private shutdown = false;
 
             private ctx?: HCAFramePlayerContext;
+            private unsettled: {resolve: (result?: any) => void, counter: number}[] = [];
 
             private readonly taskQueue: HCATaskQueue;
 
@@ -2855,7 +2914,10 @@ if (typeof document === "undefined") {
                                 this.ctx = new HCAFramePlayerContext(task.args[0]);
                                 break;
                             case "reset":
-                                delete this.ctx;
+                                await new Promise((resolve) => {
+                                    delete this.ctx;
+                                    this.unsettled.push({resolve: resolve, counter: 16});
+                                });
                                 break;
                             default:
                                 throw new Error(`unknown cmd ${task.cmd}`);
@@ -2873,7 +2935,7 @@ if (typeof document === "undefined") {
                 ctx.isPulling = true;
                 // request to pull & continue decoding
                 // won't wait for result here, just let resolveHook handle it
-                this.taskQueue.execCmd("pull", [], (newBlocks: Uint8Array) => {
+                this.taskQueue.execCmd("pull", [], {result: (newBlocks: Uint8Array) => {
                     const info = ctx.frame.Hca;
                     const hasLoop = info.hasHeader["loop"] ? true : false;
                     const pullBlockCount = ctx.pullBlockCount;
@@ -2906,7 +2968,7 @@ if (typeof document === "undefined") {
                     }
                     ctx.totalPulledBlockCount += newBlockCount;
                     ctx.isPulling = false;
-                });
+                }});
             }
 
             private writeToDecodedBuffer(frame: HCAFrame, decoded: Float32Array[]): void {
@@ -2946,6 +3008,16 @@ if (typeof document === "undefined") {
                     return false;
                 }
                 if (this.ctx == null) {
+                    // workaround the "residue" burst noise issue in Chrome
+                    const unsettled = this.unsettled.shift();
+                    if (unsettled != null) {
+                        if (--unsettled.counter > 0) this.unsettled.unshift(unsettled);
+                        else try {
+                            unsettled.resolve();
+                        } catch (e) {
+                            console.error(`error when settling promise of "reset" cmd`);
+                        }
+                    }
                     return true; // wait for new source
                 }
 
@@ -2966,7 +3038,8 @@ if (typeof document === "undefined") {
                 }
                 if (!hasLoop && this.ctx.sampleOffset >= info.endAtSample) {
                     // nothing more to play
-                    this.taskQueue.sendCmd("end", []);
+                    this.taskQueue.sendCmd("end", []); // not waiting for result
+                    delete this.ctx; // avoid sending "end" cmd for more than one time
                     return true;
                 }
                 // decode block & pull new block (if needed)
@@ -3072,8 +3145,6 @@ class HCAAudioWorkletHCAPlayer {
     private info: HCAInfo;
     private hasLoop: boolean;
     private cipher?: HCACipher;
-
-    private pendingNewProcOpts?: HCAFramePlayerProcessorOptions;
 
     private verifyCsum = false;
     get blockChecksumVerification() {
@@ -3340,76 +3411,76 @@ class HCAAudioWorkletHCAPlayer {
     }
 
     async setSource(source: Uint8Array | URL): Promise<void> {
-        if (!this.isAlive) throw new Error("dead");
-
-        // immediately stop playing previous content (get hca info from url usually takes some time)
-        if (this.isPlaying) await this.stop();
-
-        const oldSource = this.source;
-        //if (oldSource instanceof ReadableStreamDefaultReader) {
-        if (oldSource != null && !(oldSource instanceof Uint8Array)) {
-            try {
-                await oldSource.cancel(); // stop downloading from previous URL
-            } catch (e) {
-                console.error(`error when cancelling previous download`);
-            }
-        }
-
         let newInfo: HCAInfo;
         let newSource: Uint8Array | ReadableStreamDefaultReader<Uint8Array>;
         let newBuffer: Uint8Array | undefined = undefined;
-
-        if (source instanceof Uint8Array) {
-            newSource = source;
-            newInfo = new HCAInfo(source);
-        } else if (source instanceof URL) {
-            try {
-                const result = await HCAAudioWorkletHCAPlayer.getHCAInfoFromURL(source);
-                newSource = result.reader;
-                newInfo = result.info;
-                newBuffer = result.buffer;
-            } catch (e) {
-                throw e;
+        const initializeCmdItem = {cmd: "initialize", args: [null], hook: {
+            task: async (task: HCATask) => {
+                if (!this.isAlive) throw new Error("dead");
+    
+                const oldSource = this.source;
+                //if (oldSource instanceof ReadableStreamDefaultReader) {
+                if (oldSource != null && !(oldSource instanceof Uint8Array)) {
+                    try {
+                        await oldSource.cancel(); // stop downloading from previous URL
+                    } catch (e) {
+                        console.error(`error when cancelling previous download`);
+                    }
+                }
+    
+                if (source instanceof Uint8Array) {
+                    newSource = source;
+                    newInfo = new HCAInfo(source);
+                } else if (source instanceof URL) {
+                    try {
+                        const result = await HCAAudioWorkletHCAPlayer.getHCAInfoFromURL(source);
+                        newSource = result.reader;
+                        newInfo = result.info;
+                        newBuffer = result.buffer;
+                    } catch (e) {
+                        throw e;
+                    }
+                } else throw new Error("invalid source");
+    
+                // sample rate and channel count is immutable,
+                // therefore, the only way to change them is to recreate a new instance.
+                // however, there is a memleak bug in Chromium, that:
+                // (no-longer-used) audio worklet node(s) won't be recycled:
+                // https://bugs.chromium.org/p/chromium/issues/detail?id=1298955
+                if (newInfo.format.samplingRate != this.sampleRate)
+                    throw new Error("sample rate mismatch");
+                if (newInfo.format.channelCount != this.channelCount)
+                    throw new Error("channel count mismatch");
+    
+                await this._play(); // resume it, so that cmd can then be executed
+    
+                const newProcOpts = {
+                    rawHeader: newInfo.getRawHeader(),
+                    pullBlockCount: this.feedBlockCount,
+                };
+                return new HCATask(task.origin, task.taskID, task.cmd, [newProcOpts], false);
+            }, result: () => {
+                this.totalFedBlockCount = 0;
+                this.info = newInfo;
+                this.source = newSource;
+                this.srcBuf = newBuffer;
+                this.hasLoop = newInfo.hasHeader["loop"] ? true : false;
             }
-        } else throw new Error("invalid source");
-
-        // sample rate and channel count is immutable,
-        // therefore, the only way to change them is to recreate a new instance.
-        // however, there is a memleak bug in Chromium, that:
-        // (no-longer-used) audio worklet node(s) won't be recycled:
-        // https://bugs.chromium.org/p/chromium/issues/detail?id=1298955
-        if (newInfo.format.samplingRate != this.sampleRate)
-            throw new Error("sample rate mismatch");
-        if (newInfo.format.channelCount != this.channelCount)
-            throw new Error("channel count mismatch");
-
-        this.pendingNewProcOpts = {
-            rawHeader: newInfo.getRawHeader(),
-            pullBlockCount: this.feedBlockCount,
-        };
-        this.totalFedBlockCount = 0;
-        this.info = newInfo;
-        this.source = newSource;
-        this.srcBuf = newBuffer;
-        this.hasLoop = newInfo.hasHeader["loop"] ? true : false;
+        }}
+        await this.taskQueue.execMultiCmd([this.stopCmdItem, initializeCmdItem]); // ensure atomicity
     }
 
-    async play(): Promise<void> {
+    // not supposed to be used directly
+    private async _play(): Promise<void> {
         if (!this.isAlive) throw new Error("dead");
         if (this.isPlaying) return;
         if (this.source == null) throw new Error("nothing to play");
+        await this.audioCtx.resume();
         this.hcaPlayerNode.connect(this.gainNode);
         this.gainNode.connect(this.audioCtx.destination);
-        await this.audioCtx.resume();
-        const pendingNewProcOpts = this.pendingNewProcOpts;
-        if (pendingNewProcOpts != null) {
-            delete this.pendingNewProcOpts;
-            await this.taskQueue.execCmd("initialize", [pendingNewProcOpts]);
-        }
         this.isPlaying = true;
     }
-
-    async pause(): Promise<void> {
+    private async _pause(): Promise<void> {
         if (!this.isAlive) throw new Error("dead");
         if (!this.isPlaying) return;
         this.hcaPlayerNode.disconnect();
@@ -3417,16 +3488,39 @@ class HCAAudioWorkletHCAPlayer {
         await this.audioCtx.suspend();
         this.isPlaying = false;
     }
+    private readonly stopCmdItem = {
+        // exec "reset" cmd first, in order to avoid "residue" burst noise to be played in the future (observed in Chrome)
+        cmd: "reset", args: [], hook: {
+            task: async (task: HCATask) => {
+                if (!this.isAlive) throw new Error("dead");
+                if (!this.isPlaying) await this._play();
+                return task;
+            },
+            result: async () => {
+                await this._pause(); // can now suspend
+            },
+        }
+    }
 
+    // wrap with dummy task, in order to ensure atomicity
+    async pause(): Promise<void> {
+        await this.taskQueue.execCmd("nop", [], {task: (task) => {
+            task.isDummy = true; return task;
+        }, result: async () => {
+            await this._pause();
+        }});
+    }
+    async play(): Promise<void> {
+        await this.taskQueue.execCmd("nop", [], {task: (task) => {
+            task.isDummy = true; return task;
+        }, result: async () => {
+            await this._play();
+        }});
+    }
+    // not a dummy task, but similarly, wrapped to ensure atomicity
     async stop(): Promise<void> {
-        if (!this.isAlive) throw new Error("dead");
-
-        // avoid "residue" audio to be played in the future
-        // FIXME still has "residue" audio
-        if (!this.isPlaying) await this.play();
-        await this.taskQueue.execCmd("reset", []);
-
-        await this.pause();
+        const item = this.stopCmdItem;
+        await this.taskQueue.execCmd(item.cmd, item.args, item.hook);
     }
 }
 
