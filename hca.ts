@@ -2971,7 +2971,10 @@ if (typeof document === "undefined") {
                 if (ctx.isPulling) return; // already pulling. will be called again if still not enough
                 ctx.isPulling = true;
                 // request to pull & continue decoding
-                this.taskQueue.execCmd("pull", [], {result: (newBlocks: Uint8Array) => this.handleNewBlocks(ctx, newBlocks)})
+                this.taskQueue.execCmd("pull", [], {
+                    result: (newBlocks: Uint8Array) => this.handleNewBlocks(ctx, newBlocks),
+                    error: () => {ctx.isPulling = false;},
+                })
                 .catch((e) => {
                     console.warn(`pullNewBlocks failed.`, e);
                 });
