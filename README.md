@@ -172,7 +172,7 @@ For example, you may decrypt & decode a HCA (as `Uint8Array`) like:
 ```JavaScript
 async function decryptAndDecode(hca) {
     const hcaUrl = new URL("hca.js", document.baseURI);
-    let worker = new HCAWorker(hcaUrl);
+    let worker = await HCAWorker.create(hcaUrl);
     let decrypted = await worker.decrypt(hca.slice(0), "defaultkey");
     let wav = await worker.decode(decrypted, 16);
     await worker.shutdown();
@@ -180,7 +180,7 @@ async function decryptAndDecode(hca) {
 }
 ```
 
-### `new HCAWorker(selfUrl: URL | string)`
+### `async HCAWorker.create(selfUrl: URL | string): Promise<HCAWorker>`
 
  - Return a new `HCAWorker` instance (referred as `hcaWorkerInstance` below), which is generally used in **main thread** to **controls** a `Worker` running `hca.js`, so that computational jobs can be done in background without blocking the foreground main thread.
 

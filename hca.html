@@ -355,7 +355,7 @@
         const buttons = {
             startworkerbtn: async (self) => {
                 if (worker == null) {
-                    worker = new HCAWorker(hcaJsUrl);
+                    worker = await HCAWorker.create(hcaJsUrl);
                     console.log("started background worker");
                 }
                 buttons.shutdownbtn = true;
