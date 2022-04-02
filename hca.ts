@@ -2716,7 +2716,7 @@ class HCATaskQueue {
                 const hook = registered.hook;
                 if (hook != null) try {
                     if (task.hasErr && hook.error != null) await hook.error(task.errMsg);
-                    else if (task.hasResult && hook.error != null) result = await hook.error(task.result);
+                    else if (task.hasResult && hook.result != null) result = await hook.result(task.result);
                 } catch (e) {
                     console.error(`${this.origin}`, e); // won't throw
                 }
