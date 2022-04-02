@@ -89,6 +89,7 @@
         // HCAWorker instance
         var worker = null;
         const hcaJsUrl = new URL("hca.js", document.baseURI);
+        var hcaJsObjUrl = null;
 
         // local file picker
         const localfile = document.getElementById("localfile");
@@ -355,7 +356,12 @@
         const buttons = {
             startworkerbtn: async (self) => {
                 if (worker == null) {
-                    worker = await HCAWorker.create(hcaJsUrl);
+                    if (hcaJsObjUrl == null) {
+                        const response = await fetch(hcaJsUrl.href);
+                        const blob = await response.blob();
+                        hcaJsObjUrl = URL.createObjectURL(blob);
+                    }
+                    worker = await HCAWorker.create(hcaJsObjUrl);
                     console.log("started background worker");
                 }
                 buttons.shutdownbtn = true;
