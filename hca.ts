@@ -3604,16 +3604,16 @@ class HCAWorker {
     async decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0): Promise<Uint8Array> {
         return await this.taskQueue.execCmd("decode", [hca, mode, loop, volume]);
     }
-    async playWholeHCA(hca: Uint8Array, key1?: any, key2?: any): Promise<void> {
+    async playWholeHCA(hca: Uint8Array, key1?: any, key2?: any, startPlaying = true): Promise<void> {
         if (this.awHcaPlayer == null) {
             this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca);
         } else {
             await this.awHcaPlayer.setSource(hca);
         }
         this.awHcaPlayer.setDecryptionKey(key1, key2);
-        await this.awHcaPlayer.play();
+        if (startPlaying) await this.awHcaPlayer.play();
     }
-    async playHCAFromURL(url: URL | string, key1?: any, key2?: any): Promise<void> {
+    async playHCAFromURL(url: URL | string, key1?: any, key2?: any, startPlaying = true): Promise<void> {
         if (typeof url === "string") url = new URL(url, document.baseURI);
         if (this.awHcaPlayer == null) {
             this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, url);
@@ -3621,7 +3621,7 @@ class HCAWorker {
             await this.awHcaPlayer.setSource(url);
         }
         this.awHcaPlayer.setDecryptionKey(key1, key2);
-        await this.awHcaPlayer.play();
+        if (startPlaying) await this.awHcaPlayer.play();
     }
     async pausePlaying(): Promise<void> {
         if (this.awHcaPlayer == null) throw new Error();
