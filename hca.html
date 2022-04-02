@@ -468,7 +468,7 @@
                     self.textContent = "Play (successful)";
                 } catch (e) {
                     self.textContent = "Play (failed)";
-                    console.log(e);
+                    console.error(e);
                 }
                 // let the button bounce
                 self.disabled = false;
@@ -481,7 +481,7 @@
                     self.textContent = "Play (successful)";
                 } catch (e) {
                     self.textContent = "Play (failed)";
-                    console.log(e);
+                    console.error(e);
                 }
                 // let the button bounce
                 self.disabled = false;
