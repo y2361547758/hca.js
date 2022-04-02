@@ -364,6 +364,7 @@
                     worker = await HCAWorker.create(hcaJsObjUrl);
                     console.log("started background worker");
                 }
+                self.disabled = true; // added because button won't grey out if there's any await above
                 buttons.shutdownbtn = true;
             },
             shutdownbtn: async (self) => {
@@ -372,6 +373,7 @@
                     worker = null;
                     console.log("background worker is now shut down");
                 }
+                self.disabled = true; // added together with above startworkerbtn
                 buttons.startworkerbtn = true;
             },
             loadfilebtn: async (self) => {
