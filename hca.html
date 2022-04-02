@@ -614,6 +614,7 @@
                 get: function () {return !el.disabled},
                 set: function (val) {
                     if (val === "click") {
+                        el.disabled = true;
                         onclick(el);
                         return;
                     }
