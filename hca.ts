@@ -3371,7 +3371,8 @@ class HCAAudioWorkletHCAPlayer {
         newData.set(data);
         for (let offset = data.length; offset < desired; ) {
             const res = await reader.read();
-            if (res.done) throw new Error();
+            if (res.done) throw new Error(`unexpected stream end. `
+                +`it is possible that the download has been canceled (by later setSource), or the file data is incomplete`);
             const bytes = res.value;
             if (bytes.length > 0) {
                 const required = offset + bytes.length;
