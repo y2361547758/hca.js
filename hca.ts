@@ -2612,7 +2612,7 @@ class HCATaskQueue {
     private replyArgs = false;
 
     private readonly postMessage: (msg: any, transfer: Transferable[]) => void;
-    private readonly taskHandler: (task: HCATask) => void;
+    private readonly taskHandler: (task: HCATask) => any | Promise<any>;
     private readonly destroy: () => void;
     private queue: HCATask[] = [];
     private static readonly maxTaskID = 65535;
@@ -2664,7 +2664,7 @@ class HCATaskQueue {
     }
 
     constructor (origin: string,
-        postMessage: (msg: any, transfer: Transferable[]) => void, taskHandler: (task: HCATask) => void,
+        postMessage: (msg: any, transfer: Transferable[]) => void, taskHandler: (task: HCATask) => any | Promise<any>,
         destroy: () => void)
     {
         this.origin = origin;
@@ -2693,7 +2693,7 @@ class HCATaskQueue {
                     // Chrome doesn't seem to have this problem,
                     // however, in order to keep compatible with Firefox,
                     // we still have to avoid posting an Error object
-                    task.errMsg = `[${this.origin}] error when executing cmd`;
+                    task.errMsg = `[${this.origin}] error when executing cmd ${task.cmd} from ${task.origin}`;
                     if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
                 }
                 if (task.taskID != HCATaskQueue.discardReplyTaskID) try {
@@ -2721,7 +2721,7 @@ class HCATaskQueue {
                         const resultHook = registered.hook != null ? registered.hook.result : undefined;
                         const result = resultHook != null ? await resultHook(task.result) : task.result;
                         registered.resolve(result);
-                    } else throw new Error(`task (taskID=${task.taskID} cmd=${task.cmd}) has neither error nor result`);
+                    } else throw new Error(`task (origin=${task.origin} taskID=${task.taskID} cmd=${task.cmd}) has neither error nor result`);
                 } catch (e) {
                     console.error(`${this.origin}`, e);
                 }
@@ -2755,7 +2755,7 @@ class HCATaskQueue {
                 try {
                     reject();
                 } catch (e) {
-                    console.error(`[${this.origin}] error rejecting ${taskID}`, e);
+                    console.error(`[${this.origin}] error rejecting taskID=${taskID}`, e);
                 }
             }
         }
