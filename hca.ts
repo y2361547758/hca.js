@@ -2916,7 +2916,7 @@ if (typeof document === "undefined") {
                             case "reset":
                                 await new Promise((resolve) => {
                                     delete this.ctx;
-                                    this.unsettled.push({resolve: resolve, counter: 16});
+                                    this.unsettled.push({resolve: resolve, counter: 32});
                                 });
                                 break;
                             default:
@@ -3423,6 +3423,7 @@ class HCAAudioWorkletHCAPlayer {
                 if (oldSource != null && !(oldSource instanceof Uint8Array)) {
                     try {
                         await oldSource.cancel(); // stop downloading from previous URL
+                        // FIXME Firefox doesn't seem to abort previous download
                     } catch (e) {
                         console.error(`error when cancelling previous download`);
                     }
