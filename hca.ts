@@ -2739,10 +2739,9 @@ class HCATaskQueue {
     }
     errHandler(data: any) {
         // irrecoverable error
-        // FIXME triggered in background worker, not notifying foreground main thread
         if (this._isAlive) {
             // print error message
-            console.error(`[${this.origin}] destroying background worker on error`, data);
+            console.error(`[${this.origin}] destroying background worker on irrecoverable error`, data);
             // destroy background worker
             try {
                 this.destroy();
@@ -2926,7 +2925,7 @@ if (typeof document === "undefined") {
                                 throw new Error(`unknown cmd ${task.cmd}`);
                         }
                     },
-                    () => {} // cannot destroy the caller/controller, which is the foreground main thread
+                    () => {this.taskQueue.sendCmd("self-destruct", []);}
                 );
                 this.taskQueue.configTransfer(true, false);
                 this.port.onmessage = (ev: MessageEvent) => this.taskQueue.msgHandler(ev);
@@ -3134,7 +3133,7 @@ if (typeof document === "undefined") {
                         throw new Error(`unknown cmd ${task.cmd}`);
                 }
             },
-            () => {} // cannot destroy the caller/controller, which is the foreground main thread
+            () => {taskQueue.sendCmd("self-destruct", []);}
         );
         onmessage = (ev: MessageEvent) => taskQueue.msgHandler(ev);
     }
@@ -3192,6 +3191,8 @@ class HCAAudioWorkletHCAPlayer {
         switch (task.cmd) {
             case "nop":
                 return;
+            case "self-destruct": // doesn't seem to have a chance to be called
+                console.error(`HCAFramePlayer requested to self-destruct`);
             case "end":
                 await this.stop();
                 return; // actually not sending back reply
@@ -3578,7 +3579,14 @@ class HCAWorker {
         this.selfUrl = selfUrl;
         this.taskQueue = new HCATaskQueue("Main-HCAWorker",
             (msg: any, trans: Transferable[]) => this.hcaWorker.postMessage(msg, trans),
-            () => {},
+            (task) => {
+                switch (task.cmd) {
+                    case "self-destruct": // doesn't seem to have a chance to be called
+                        console.error(`hcaWorker requested to self-destruct`);
+                        this.hcaWorker.terminate();
+                        break;
+                }
+            },
             () => this.hcaWorker.terminate());
         this.hcaWorker.onmessage = (msg) => this.taskQueue.msgHandler(msg);
         this.hcaWorker.onerror = (msg) => this.taskQueue.errHandler(msg);
