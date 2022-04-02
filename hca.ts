@@ -2530,7 +2530,7 @@ class HCATransTypedArray {
 interface HCATaskHook {
     task?: (task: HCATask) => HCATask | Promise<HCATask> // called before sending cmd & execution
     result?: (result?: any) => any | Promise<any>, // called after execution & receiving reply & reply has result
-    error?: (reason?: string) => string | undefined | Promise<string | undefined>, // same as above except it's for errMsg
+    error?: (reason?: string) => void | Promise<void>, // same as above except it's for errMsg and it won't change/map reason
 }
 
 class HCATask {
@@ -2711,20 +2711,23 @@ class HCATaskQueue {
                 const registered = this.callbacks[task.taskID];
                 delete this.callbacks[task.taskID];
 
-                // settle promise
-                try {
-                    if (task.hasErr) {
-                        const errorHook = registered.hook != null ? registered.hook.error : undefined;
-                        const errMsg = errorHook != null ? await errorHook(task.errMsg) : task.errMsg;
-                        registered.reject(errMsg);
-                    } else if (task.hasResult) {
-                        const resultHook = registered.hook != null ? registered.hook.result : undefined;
-                        const result = resultHook != null ? await resultHook(task.result) : task.result;
-                        registered.resolve(result);
-                    } else throw new Error(`task (origin=${task.origin} taskID=${task.taskID} cmd=${task.cmd}) has neither error nor result`);
+                // apply hook
+                let result = task.hasResult ? task.result : undefined;
+                const hook = registered.hook;
+                if (hook != null) try {
+                    if (task.hasErr && hook.error != null) await hook.error(task.errMsg);
+                    else if (task.hasResult && hook.error != null) result = await hook.error(task.result);
                 } catch (e) {
-                    console.error(`${this.origin}`, e);
+                    console.error(`${this.origin}`, e); // won't throw
                 }
+
+                // settle promise
+                if (task.hasErr) {
+                    registered.reject(task.errMsg);
+                } else if (task.hasResult) {
+                    registered.resolve(result);
+                } else throw new Error(`task (origin=${task.origin} taskID=${task.taskID} cmd=${task.cmd}) `
+                    +`has neither error nor result`); // should never happen
 
                 // start next task
                 await this.sendNextTask();
@@ -2929,46 +2932,50 @@ if (typeof document === "undefined") {
                 this.port.onmessage = (ev: MessageEvent) => this.taskQueue.msgHandler(ev);
             }
 
+            private handleNewBlocks(ctx: HCAFramePlayerContext, newBlocks: Uint8Array): void {
+                const info = ctx.frame.Hca;
+                const hasLoop = info.hasHeader["loop"] ? true : false;
+                const pullBlockCount = ctx.pullBlockCount;
+                const encoded = ctx.encoded;
+                if (newBlocks.length % info.blockSize != 0) {
+                    throw new Error(`newBlocks.length=${newBlocks.length} should be multiple of blockSize`);
+                }
+                const newBlockCount = newBlocks.length / info.blockSize;
+                const expected = info.blockSize * pullBlockCount;
+                if (hasLoop) {
+                    let encodedOffset = info.blockSize * ctx.totalPulledBlockCount;
+                    if (encodedOffset + newBlocks.length > encoded.length) {
+                        throw new Error(`has loop header, buffer will overflow`);
+                    }
+                    encoded.set(newBlocks, encodedOffset);
+                } else {
+                    if (newBlocks.length != expected) {
+                        throw new Error(`no loop header, newBlocks.length (${newBlocks.length}) != expected (${expected})`);
+                    }
+                    switch (ctx.totalPulledBlockCount % (pullBlockCount * 2)) {
+                        case 0:
+                            encoded.set(newBlocks);
+                            break;
+                        case pullBlockCount:
+                            encoded.set(newBlocks, expected);
+                            break;
+                        default:
+                            throw new Error();
+                    }
+                }
+                ctx.totalPulledBlockCount += newBlockCount;
+                ctx.isPulling = false;
+            }
+
             private pullNewBlocks(ctx: HCAFramePlayerContext): void {
                 // if ctx passed in had been actually deleted, it won't affect the current using ctx
                 if (ctx.isPulling) return; // already pulling. will be called again if still not enough
                 ctx.isPulling = true;
                 // request to pull & continue decoding
-                // won't wait for result here, just let resolveHook handle it
-                this.taskQueue.execCmd("pull", [], {result: (newBlocks: Uint8Array) => {
-                    const info = ctx.frame.Hca;
-                    const hasLoop = info.hasHeader["loop"] ? true : false;
-                    const pullBlockCount = ctx.pullBlockCount;
-                    const encoded = ctx.encoded;
-                    if (newBlocks.length % info.blockSize != 0) {
-                        throw new Error(`newBlocks.length=${newBlocks.length} should be multiple of blockSize`);
-                    }
-                    const newBlockCount = newBlocks.length / info.blockSize;
-                    const expected = info.blockSize * pullBlockCount;
-                    if (hasLoop) {
-                        let encodedOffset = info.blockSize * ctx.totalPulledBlockCount;
-                        if (encodedOffset + newBlocks.length > encoded.length) {
-                            throw new Error(`has loop header, buffer will overflow`);
-                        }
-                        encoded.set(newBlocks, encodedOffset);
-                    } else {
-                        if (newBlocks.length != expected) {
-                            throw new Error(`no loop header, newBlocks.length (${newBlocks.length}) != expected (${expected})`);
-                        }
-                        switch (ctx.totalPulledBlockCount % (pullBlockCount * 2)) {
-                            case 0:
-                                encoded.set(newBlocks);
-                                break;
-                            case pullBlockCount:
-                                encoded.set(newBlocks, expected);
-                                break;
-                            default:
-                                throw new Error();
-                        }
-                    }
-                    ctx.totalPulledBlockCount += newBlockCount;
-                    ctx.isPulling = false;
-                }});
+                this.taskQueue.execCmd("pull", [], {result: (newBlocks: Uint8Array) => this.handleNewBlocks(ctx, newBlocks)})
+                .catch((e) => {
+                    console.warn(`pullNewBlocks failed.`, e);
+                });
             }
 
             private writeToDecodedBuffer(frame: HCAFrame, decoded: Float32Array[]): void {
