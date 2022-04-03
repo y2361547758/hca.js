@@ -2861,6 +2861,8 @@ if (typeof document === "undefined") {
     if (typeof onmessage === "undefined") {
         // AudioWorklet
         class HCAFramePlayerContext {
+            isPlaying = false;
+
             readonly defaultPullBlockCount = 128;
             pullBlockCount: number;
 
@@ -2934,6 +2936,13 @@ if (typeof document === "undefined") {
                             case "reset":
                                 await new Promise((resolve) => {
                                     delete this.ctx;
+                                    this.unsettled.push({resolve: resolve, counter: 32});
+                                });
+                                break;
+                            case "setPlaying":
+                                await new Promise((resolve) => {
+                                    if (this.ctx == null) throw new Error(`not initialized`);
+                                    this.ctx.isPlaying = task.args[0] ? true : false;
                                     this.unsettled.push({resolve: resolve, counter: 32});
                                 });
                                 break;
@@ -3032,19 +3041,18 @@ if (typeof document === "undefined") {
                     this.port.close();
                     return false;
                 }
-                if (this.ctx == null) {
-                    // workaround the "residue" burst noise issue in Chrome
-                    const unsettled = this.unsettled.shift();
-                    if (unsettled != null) {
-                        if (--unsettled.counter > 0) this.unsettled.unshift(unsettled);
-                        else try {
-                            unsettled.resolve();
-                        } catch (e) {
-                            console.error(`error when settling promise of "reset" cmd`);
-                        }
+                // workaround the "residue" burst noise issue in Chrome
+                const unsettled = this.unsettled.shift();
+                if (unsettled != null) {
+                    if (--unsettled.counter > 0) this.unsettled.unshift(unsettled);
+                    else try {
+                        unsettled.resolve();
+                    } catch (e) {
+                        console.error(`error when settling promise of "reset" or "setPlaying" cmd`);
                     }
-                    return true; // wait for new source
                 }
+                if (this.ctx == null) return true; // wait for new source
+                else if (!this.ctx.isPlaying) return true;
 
                 const output = outputs[0];
                 const renderQuantumSize = output[0].length;
@@ -3450,7 +3458,7 @@ class HCAAudioWorkletHCAPlayer {
         const initializeCmdItem = {cmd: "initialize", args: [null], hook: {
             task: async (task: HCATask) => {
                 if (!this.isAlive) throw new Error("dead");
-    
+
                 const oldSource = this.source;
                 //if (oldSource instanceof ReadableStreamDefaultReader) {
                 if (oldSource != null && !(oldSource instanceof Uint8Array)) {
@@ -3461,7 +3469,7 @@ class HCAAudioWorkletHCAPlayer {
                         console.error(`error when cancelling previous download.`, e);
                     }
                 }
-    
+
                 if (source instanceof Uint8Array) {
                     newSource = source;
                     newInfo = new HCAInfo(source);
@@ -3475,7 +3483,7 @@ class HCAAudioWorkletHCAPlayer {
                         throw e;
                     }
                 } else throw new Error("invalid source");
-    
+
                 // sample rate and channel count is immutable,
                 // therefore, the only way to change them is to recreate a new instance.
                 // however, there is a memleak bug in Chromium, that:
@@ -3485,15 +3493,16 @@ class HCAAudioWorkletHCAPlayer {
                     throw new Error("sample rate mismatch");
                 if (newInfo.format.channelCount != this.channelCount)
                     throw new Error("channel count mismatch");
-    
+
                 await this._play(); // resume it, so that cmd can then be executed
-    
+
                 const newProcOpts = {
                     rawHeader: newInfo.getRawHeader(),
                     pullBlockCount: this.feedBlockCount,
                 };
                 return new HCATask(task.origin, task.taskID, task.cmd, [newProcOpts], false);
-            }, result: () => {
+            }, result: async () => {
+                await this._pause(); // initialized, but it's paused, until being requested to start/play (resume)
                 this.totalFedBlockCount = 0;
                 this.info = newInfo;
                 this.source = newSource;
@@ -3536,22 +3545,31 @@ class HCAAudioWorkletHCAPlayer {
         }
     }
 
-    // wrap with dummy task, in order to ensure atomicity
+    // wraped to ensure atomicity
+    private async setPlaying(toPlay: boolean): Promise<void> {
+        // simlilar to stopCmdItem above, send "setPlaying" cmd to avoid "residue" burst noise (if necessary)
+        await this.taskQueue.execCmd("setPlaying", [toPlay], {
+            task: async (task: HCATask) => {
+                if (!this.isAlive) throw new Error("dead");
+                if (this.isPlaying && toPlay) task.isDummy = true; // already resumed, not sending cmd
+                else if (!this.isPlaying) {
+                    if (!toPlay) task.isDummy = true; // already paused, not sending cmd
+                    else await this._play();
+                }
+                return task;
+            },
+            result: async () => {
+                if (toPlay) await this._play();
+                else await this._pause();
+            }
+        });
+    }
     async pause(): Promise<void> {
-        await this.taskQueue.execCmd("nop", [], {task: (task) => {
-            task.isDummy = true; return task;
-        }, result: async () => {
-            await this._pause();
-        }});
+        await this.setPlaying(false);
     }
     async play(): Promise<void> {
-        await this.taskQueue.execCmd("nop", [], {task: (task) => {
-            task.isDummy = true; return task;
-        }, result: async () => {
-            await this._play();
-        }});
+        await this.setPlaying(true);
     }
-    // not a dummy task, but similarly, wrapped to ensure atomicity
     async stop(): Promise<void> {
         const item = this.stopCmdItem;
         await this.taskQueue.execCmd(item.cmd, item.args, item.hook);
