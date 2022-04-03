@@ -151,7 +151,7 @@ let hasCiphHeader = hcaInfoInstance.hasHeader["ciph"];
 
 ### `hcaInfoInstance.hasHeader[SIG]: boolean`
 
- - Indicates whether specified header `SIG` (like `"fmt"`, `"loop"` etc) exists, `true` if exists, or `false` if not.
+ - Indicates whether specified header `SIG` (like `"fmt"`, `"loop"` etc) exists, `true` if exists, othewrise (typically `undefined`) if not.
 
 ### `hcaInfoInstance.modify(hca: Uint8Array, sig: string, newData: Uint8Array): void`
 
@@ -182,7 +182,7 @@ async function decryptAndDecode(hca) {
 
 ### `async HCAWorker.create(selfUrl: URL | string): Promise<HCAWorker>`
 
- - Return a new `HCAWorker` instance (referred as `hcaWorkerInstance` below), which is generally used in **main thread** to **controls** a `Worker` running `hca.js`, so that computational jobs can be done in background without blocking the foreground main thread.
+ - Return a new `HCAWorker` instance (referred as `hcaWorkerInstance` below), which is generally used in **main thread** to **control** a `Worker` running `hca.js`, so that computational jobs can be done in background without blocking the foreground main thread.
 
  - **`selfUrl` should be the URL of `hca.js` itself.**
 
