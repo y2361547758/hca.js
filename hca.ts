@@ -2911,7 +2911,9 @@ if (typeof document === "undefined") {
             private shutdown = false;
 
             private ctx?: HCAFramePlayerContext;
+
             private unsettled: {resolve: (result?: any) => void, counter: number}[] = [];
+            private readonly waitCountDownFrom = 32;
 
             private readonly taskQueue: HCATaskQueue;
 
@@ -2936,14 +2938,15 @@ if (typeof document === "undefined") {
                             case "reset":
                                 await new Promise((resolve) => {
                                     delete this.ctx;
-                                    this.unsettled.push({resolve: resolve, counter: 32});
+                                    this.unsettled.push({resolve: resolve, counter: this.waitCountDownFrom});
                                 });
                                 break;
-                            case "setPlaying":
-                                await new Promise((resolve) => {
-                                    if (this.ctx == null) throw new Error(`not initialized`);
-                                    this.ctx.isPlaying = task.args[0] ? true : false;
-                                    this.unsettled.push({resolve: resolve, counter: 32});
+                            case "pause":
+                            case "resume":
+                                if (this.ctx == null) throw new Error(`not initialized`);
+                                this.ctx.isPlaying = task.cmd === "resume";
+                                if (!this.ctx.isPlaying) await new Promise((resolve) => {
+                                    this.unsettled.push({resolve: resolve, counter: this.waitCountDownFrom});
                                 });
                                 break;
                             default:
@@ -3041,18 +3044,19 @@ if (typeof document === "undefined") {
                     this.port.close();
                     return false;
                 }
-                // workaround the "residue" burst noise issue in Chrome
-                const unsettled = this.unsettled.shift();
-                if (unsettled != null) {
-                    if (--unsettled.counter > 0) this.unsettled.unshift(unsettled);
-                    else try {
-                        unsettled.resolve();
-                    } catch (e) {
-                        console.error(`error when settling promise of "reset" or "setPlaying" cmd`);
+                if (this.ctx == null || !this.ctx.isPlaying) {
+                    // workaround the "residue" burst noise issue in Chrome
+                    const unsettled = this.unsettled.shift();
+                    if (unsettled != null) {
+                        if (--unsettled.counter > 0) this.unsettled.unshift(unsettled);
+                        else try {
+                            unsettled.resolve();
+                        } catch (e) {
+                            console.error(`error when settling promise of "reset" or "setPlaying" cmd`);
+                        }
                     }
+                    return true; // wait for new source or resume
                 }
-                if (this.ctx == null) return true; // wait for new source
-                else if (!this.ctx.isPlaying) return true;
 
                 const output = outputs[0];
                 const renderQuantumSize = output[0].length;
@@ -3547,8 +3551,8 @@ class HCAAudioWorkletHCAPlayer {
 
     // wraped to ensure atomicity
     private async setPlaying(toPlay: boolean): Promise<void> {
-        // simlilar to stopCmdItem above, send "setPlaying" cmd to avoid "residue" burst noise (if necessary)
-        await this.taskQueue.execCmd("setPlaying", [toPlay], {
+        // simlilar to stopCmdItem above, send "pause" cmd to avoid "residue" burst noise
+        await this.taskQueue.execCmd(toPlay ? "resume" : "pause", [], {
             task: async (task: HCATask) => {
                 if (!this.isAlive) throw new Error("dead");
                 if (this.isPlaying && toPlay) task.isDummy = true; // already resumed, not sending cmd
