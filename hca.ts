@@ -2649,24 +2649,26 @@ class HCATaskQueue {
             this.isIdle = true;
         } else {
             this.isIdle = false;
+            // apply hook first
+            const registered = this.callbacks[task.taskID];
+            const taskHook = registered != null && registered.hook != null && registered.hook.task != null
+                ? registered.hook.task
+                : undefined;
+            if (taskHook != null) try {
+                task = await taskHook(task);
+            } catch (e) {
+                task.errMsg = `[${this.origin}] error when applying hook `
+                    +`before executing cmd ${task.cmd} from ${task.origin}`;
+                if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
+                this.msgHandler(new MessageEvent("message", {data: task})); // use a fake reply, won't await
+            }
+            // send task
             if (task.isDummy) {
-                // not actually sending, use a fake reply
                 task.result = null;
-                this.msgHandler(new MessageEvent("message", {data: task})); // won't await
+                const ev = new MessageEvent("message", {data: task}); // not actually sending, use a fake reply
+                this.msgHandler(ev); // won't await
             } else {
-                const registered = this.callbacks[task.taskID];
-                const taskHook = registered != null && registered.hook != null && registered.hook.task != null
-                    ? registered.hook.task
-                    : undefined;
-                if (taskHook != null) try {
-                    task = await taskHook(task); // apply hook first
-                } catch (e) {
-                    task.errMsg = `[${this.origin}] error when applying hook `
-                        +`before executing cmd ${task.cmd} from ${task.origin}`;
-                    if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
-                    this.msgHandler(new MessageEvent("message", {data: task})); // use a fake reply, won't await
-                }
-                if (!task.hasErr) this.sendTask(task);
+                this.sendTask(task);
             }
         }
     }
@@ -3555,10 +3557,12 @@ class HCAAudioWorkletHCAPlayer {
         await this.taskQueue.execCmd(toPlay ? "resume" : "pause", [], {
             task: async (task: HCATask) => {
                 if (!this.isAlive) throw new Error("dead");
-                if (this.isPlaying && toPlay) task.isDummy = true; // already resumed, not sending cmd
-                else if (!this.isPlaying) {
-                    if (!toPlay) task.isDummy = true; // already paused, not sending cmd
-                    else await this._play();
+                if (this.isPlaying) {
+                    if (toPlay) task.isDummy = true; // already resumed, not sending cmd
+                    // else should still keep playing until "pause" cmd returns
+                } else {
+                    if (toPlay) await this._play();
+                    else task.isDummy = true; // already paused, not sending cmd
                 }
                 return task;
             },
