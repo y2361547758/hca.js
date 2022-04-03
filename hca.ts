@@ -2613,9 +2613,9 @@ class HCATaskQueue {
 
     private readonly postMessage: (msg: any, transfer: Transferable[]) => void;
     private readonly taskHandler: (task: HCATask) => any | Promise<any>;
-    private readonly destroy: () => void;
+    private readonly destroy: () => void | Promise<void>;
     private queue: HCATask[] = [];
-    private static readonly maxTaskID = 65535;
+    private static readonly maxTaskID = 256; // there's recursion in sendNextTask when making fake reply
     private _lastTaskID = 0;
     private getNextTaskID(): number {
         const max = HCATaskQueue.maxTaskID - 1;
@@ -2644,7 +2644,7 @@ class HCATaskQueue {
     }
 
     private async sendNextTask(): Promise<void> {
-        const task = this.queue.shift();
+        let task = this.queue.shift();
         if (task == null) {
             this.isIdle = true;
         } else {
@@ -2658,14 +2658,22 @@ class HCATaskQueue {
                 const taskHook = registered != null && registered.hook != null && registered.hook.task != null
                     ? registered.hook.task
                     : undefined;
-                this.sendTask(taskHook != null ? await taskHook(task) : task);
+                if (taskHook != null) try {
+                    task = await taskHook(task); // apply hook first
+                } catch (e) {
+                    task.errMsg = `[${this.origin}] error when applying hook `
+                        +`before executing cmd ${task.cmd} from ${task.origin}`;
+                    if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
+                    this.msgHandler(new MessageEvent("message", {data: task})); // use a fake reply, won't await
+                }
+                if (!task.hasErr) this.sendTask(task);
             }
         }
     }
 
     constructor (origin: string,
         postMessage: (msg: any, transfer: Transferable[]) => void, taskHandler: (task: HCATask) => any | Promise<any>,
-        destroy: () => void)
+        destroy: () => void | Promise<void>)
     {
         this.origin = origin;
         this.postMessage = postMessage;
@@ -2686,7 +2694,6 @@ class HCATaskQueue {
                 try {
                     task.result = await this.taskHandler(task);
                 } catch (e) {
-                    console.error(`[${this.origin}]`, e);
                     // it's observed that Firefox refuses to postMessage an Error object:
                     // "DataCloneError: The object could not be cloned."
                     // (observed in Firefox 97, not clear about other versions)
@@ -2699,7 +2706,7 @@ class HCATaskQueue {
                 if (task.taskID != HCATaskQueue.discardReplyTaskID) try {
                     this.sendReply(task);
                 } catch (e) {
-                    console.error(`[${this.origin}]`, e);
+                    console.error(`[${this.origin}] sendReply failed.`, e);
                     task.errMsg = (task.errMsg == null ? "" : task.errMsg + "\n\n") + "postMessage from Worker failed";
                     if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
                     // try again
@@ -2718,7 +2725,10 @@ class HCATaskQueue {
                     if (task.hasErr && hook.error != null) await hook.error(task.errMsg);
                     else if (task.hasResult && hook.result != null) result = await hook.result(task.result);
                 } catch (e) {
-                    console.error(`${this.origin}`, e); // won't throw
+                    if (!task.hasErr) task.errMsg = "";
+                    task.errMsg += `[${this.origin}] error when applying hook `
+                        +`after executing cmd ${task.cmd} from ${task.origin}`;
+                    if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
                 }
 
                 // settle promise
@@ -2734,22 +2744,21 @@ class HCATaskQueue {
             }
         } catch (e) {
             // irrecoverable error
-            this.errHandler(e);
+            await this.errHandler(e);
         }
     }
-    errHandler(data: any) {
+    async errHandler(data: any) {
         // irrecoverable error
         if (this._isAlive) {
+            this._isAlive = false;
             // print error message
             console.error(`[${this.origin}] destroying background worker on irrecoverable error`, data);
             // destroy background worker
             try {
-                this.destroy();
+                await this.destroy();
             } catch (e) {
-                console.error(`[${this.origin}] cannot destroy`, e);
+                console.error(`[${this.origin}] error when trying to destroy()`, e);
             }
-            // set isAlive to false - must be after destroy()
-            this._isAlive = false;
             // reject all pending promises
             for (let taskID in this.callbacks) {
                 const reject = this.callbacks[taskID].reject;
@@ -2826,10 +2835,17 @@ class HCATaskQueue {
         this.sendTask(task);
     }
 
-    async shutdown(): Promise<void> {
+    async shutdown(forcibly = false): Promise<void> {
         if (this._isAlive) {
-            await this.execCmd("nop", [], {result: () => {
-                this.destroy();
+            if (forcibly) {
+                try {
+                    await this.destroy();
+                } catch (e) {
+                    console.error(`[${this.origin}] error when trying to forcibly shutdown.`, e);
+                }
+                this._isAlive = false;
+            } else await this.execCmd("nop", [], {result: async () => {
+                await this.destroy();
                 this._isAlive = false;
             }});
         }
@@ -3067,7 +3083,12 @@ if (typeof document === "undefined") {
                             : endBlockIndex % (this.ctx.pullBlockCount * 2));
                         let end = start + info.blockSize;
                         if (end > encoded.length) throw new Error("block end offset exceeds buffer size");
-                        HCA.decodeBlock(this.ctx.frame, encoded.subarray(start, end));
+                        try {
+                            HCA.decodeBlock(this.ctx.frame, encoded.subarray(start, end));
+                        } catch (e) {
+                            console.error(`error decoding block ${endBlockIndex}, filling zero data...`, e);
+                            this.ctx.frame.Channels.forEach((c) => {c.PcmFloat.forEach((sf) => sf.fill(0))});
+                        }
                         this.writeToDecodedBuffer(this.ctx.frame, this.ctx.decoded);
                         this.ctx.lastDecodedBlockIndex = endBlockIndex;
                         if (this.ctx.totalPulledBlockCount < (hasLoop ? info.loop.end : info.format.blockCount)) {
@@ -3196,6 +3217,8 @@ class HCAAudioWorkletHCAPlayer {
                 return;
             case "self-destruct": // doesn't seem to have a chance to be called
                 console.error(`HCAFramePlayer requested to self-destruct`);
+                await this.taskQueue.shutdown(true);
+                return;
             case "end":
                 await this.stop();
                 return; // actually not sending back reply
@@ -3219,6 +3242,7 @@ class HCAAudioWorkletHCAPlayer {
                     downloadSize = Math.min(downloadSize, maxDownlaodSize);
                     let remaining = downloadSize - this.srcBuf.length;
                     if (remaining > 0) {
+                        // FIXME connection loss is not handled/recovered
                         this.srcBuf = await HCAAudioWorkletHCAPlayer.readAndAppend(this.source, this.srcBuf, remaining);
                     }
                     if (this.srcBuf.length < size) throw new Error("srcBuf still smaller than expected");
@@ -3298,35 +3322,32 @@ class HCAAudioWorkletHCAPlayer {
             info, actualSource, srcBuf);
     }
 
-    async destroy(): Promise<void> {
-        if (!this.isAlive) {
-            console.error("already died");
-            return;
-        }
+    private async _terminate(): Promise<void> {
+        // I didn't find terminate() for AudioWorklet so I made one
         try {
             this.taskQueue.sendCmd("shutdown", []); // not waiting for result
         } catch (e) {
-            console.error(`cannot send shutdown cmd`);
+            console.error(`error trying to send shutdown cmd.`, e);
         }
         try {
             this.hcaPlayerNode.port.close();
         } catch (e) {
-            console.error(`cannot close message port`);
+            console.error(`error trying to close message port`, e);
         }
         try {
             this.hcaPlayerNode.disconnect();
         } catch (e) {
-            console.error(`cannot disconnect hcaPlayerNode`);
+            console.error(`error trying to disconnect hcaPlayerNode`, e);
         }
         try {
             this.gainNode.disconnect();
         } catch (e) {
-            console.error(`cannot disconnect gainNode`);
+            console.error(`error trying to disconnect gainNode`, e);
         }
         try {
             await this.audioCtx.close();
         } catch (e) {
-            console.error(`cannot close audio context`);
+            console.error(`error trying to close audio context`, e);
         }
     }
 
@@ -3338,7 +3359,7 @@ class HCAAudioWorkletHCAPlayer {
         this.taskQueue = new HCATaskQueue("Main-HCAAudioWorkletHCAPlayer",
             (msg: any, trans: Transferable[]) => hcaPlayerNode.port.postMessage(msg, trans),
             (task: HCATask) => this.taskHandler(task),
-            () => this.destroy());
+            async () => await this._terminate());
         hcaPlayerNode.port.onmessage = (ev) => this.taskQueue.msgHandler(ev);
         hcaPlayerNode.port.onmessageerror = (ev) => this.taskQueue.errHandler(ev);
         hcaPlayerNode.onprocessorerror = (ev) => this.taskQueue.errHandler(ev);
@@ -3437,7 +3458,7 @@ class HCAAudioWorkletHCAPlayer {
                         await oldSource.cancel(); // stop downloading from previous URL
                         // FIXME Firefox doesn't seem to abort previous download
                     } catch (e) {
-                        console.error(`error when cancelling previous download`);
+                        console.error(`error when cancelling previous download.`, e);
                     }
                 }
     
@@ -3535,6 +3556,14 @@ class HCAAudioWorkletHCAPlayer {
         const item = this.stopCmdItem;
         await this.taskQueue.execCmd(item.cmd, item.args, item.hook);
     }
+
+    async shutdown(forcibly = false): Promise<void> {
+        if (!this.isAlive) {
+            console.error(`already shutdown`);
+            return;
+        }
+        await this.taskQueue.shutdown(forcibly);
+    }
 }
 
 // create & control worker
@@ -3547,11 +3576,9 @@ class HCAWorker {
     private hcaWorker: Worker;
     private awHcaPlayer?: HCAAudioWorkletHCAPlayer;
     private lastTick = 0;
-    async shutdown(): Promise<void> {
-        if (this.taskQueue.isAlive) {
-            await this.taskQueue.shutdown();
-            if (this.awHcaPlayer != null) this.awHcaPlayer.destroy();
-        }
+    async shutdown(forcibly = false): Promise<void> {
+        if (this.taskQueue.isAlive) await this.taskQueue.shutdown(forcibly);
+        if (this.awHcaPlayer != null && this.awHcaPlayer.isAlive) await this.awHcaPlayer.shutdown(forcibly);
     }
     async tick(): Promise<void> {
         await this.taskQueue.execCmd("nop", []);
@@ -3582,11 +3609,11 @@ class HCAWorker {
         this.selfUrl = selfUrl;
         this.taskQueue = new HCATaskQueue("Main-HCAWorker",
             (msg: any, trans: Transferable[]) => this.hcaWorker.postMessage(msg, trans),
-            (task) => {
+            async (task) => {
                 switch (task.cmd) {
                     case "self-destruct": // doesn't seem to have a chance to be called
                         console.error(`hcaWorker requested to self-destruct`);
-                        this.hcaWorker.terminate();
+                        await this.taskQueue.shutdown(true);
                         break;
                 }
             },
