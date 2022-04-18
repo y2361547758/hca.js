@@ -3179,6 +3179,8 @@ if (typeof document === "undefined") {
 
 // create & control audio worklet
 class HCAAudioWorkletHCAPlayer {
+    private static readonly feedByteMax = 32768;
+    
     get isAlive(): boolean {
         return this.taskQueue.isAlive;
     }
@@ -3289,10 +3291,9 @@ class HCAAudioWorkletHCAPlayer {
         }
     }
 
-    static async create(selfUrl: URL, source: Uint8Array | URL, feedByteMax = 32768): Promise<HCAAudioWorkletHCAPlayer> {
+    static async create(selfUrl: URL, source: Uint8Array | URL, key1?: any, key2?: any): Promise<HCAAudioWorkletHCAPlayer> {
         if (!(selfUrl instanceof URL)) throw new Error();
         if (!(source instanceof Uint8Array || source instanceof URL)) throw new Error();
-        if (typeof feedByteMax !== "number" || isNaN(feedByteMax)) throw new Error();
 
         let actualSource: Uint8Array | ReadableStreamDefaultReader<Uint8Array>;
         let info: HCAInfo;
@@ -3306,10 +3307,12 @@ class HCAAudioWorkletHCAPlayer {
             info = fetched.info;
             srcBuf = fetched.buffer;
         } else throw Error();
-        feedByteMax = Math.floor(feedByteMax);
+        let feedByteMax = Math.floor(this.feedByteMax);
         if (feedByteMax < info.blockSize) throw new Error();
         feedByteMax -= feedByteMax % info.blockSize;
         const feedBlockCount = feedByteMax / info.blockSize;
+        // initialize cipher
+        const cipher = this.getCipher(info, key1, key2);
         // create audio context
         const audioCtx = new AudioContext({
             latencyHint: "playback",
@@ -3333,7 +3336,7 @@ class HCAAudioWorkletHCAPlayer {
         await audioCtx.suspend();
         // create controller object
         return new HCAAudioWorkletHCAPlayer(selfUrl, audioCtx, hcaPlayerNode, gainNode, feedBlockCount,
-            info, actualSource, srcBuf);
+            info, actualSource, srcBuf, cipher);
     }
 
     private async _terminate(): Promise<void> {
@@ -3366,7 +3369,7 @@ class HCAAudioWorkletHCAPlayer {
     }
 
     private constructor(selfUrl: URL, audioCtx: AudioContext, hcaPlayerNode: AudioWorkletNode, gainNode: GainNode, feedBlockCount: number,
-        info: HCAInfo, source: Uint8Array | ReadableStreamDefaultReader<Uint8Array>, srcBuf?: Uint8Array)
+        info: HCAInfo, source: Uint8Array | ReadableStreamDefaultReader<Uint8Array>, srcBuf?: Uint8Array, cipher?: HCACipher)
     {
         this.selfUrl = selfUrl;
         this.audioCtx = audioCtx;
@@ -3382,27 +3385,24 @@ class HCAAudioWorkletHCAPlayer {
         this.feedBlockCount = feedBlockCount;
         this.info = info;
         this.source = source;
+        this.cipher = cipher;
         this.srcBuf = srcBuf;
         this.sampleRate = info.format.samplingRate;
         this.channelCount = info.format.channelCount;
         this.hasLoop = info.hasHeader["loop"] ? true : false;
     }
 
-    setDecryptionKey(key1?: any, key2?: any): void {
-        if (!this.isAlive) throw new Error("dead");
-        switch (this.info.cipher) {
+    private static getCipher(info: HCAInfo, key1?: any, key2?: any): HCACipher | undefined {
+        switch (info.cipher) {
             case 0:
                 // not encrypted
-                this.cipher = undefined;
-                break;
+                return undefined;
             case 1:
                 // encrypted with "no key"
-                this.cipher = new HCACipher("none"); // ignore given keys
-                break;
+                return new HCACipher("none"); // ignore given keys
             case 0x38:
                 // encrypted with keys - will yield incorrect waveform if incorrect keys are given!
-                this.cipher = new HCACipher(key1, key2);
-                break;
+                return new HCACipher(key1, key2);
             default:
                 throw new Error("unknown ciph.type");
         }
@@ -3457,7 +3457,7 @@ class HCAAudioWorkletHCAPlayer {
         };
     }
 
-    async setSource(source: Uint8Array | URL): Promise<void> {
+    async setSource(source: Uint8Array | URL, key1?: any, key2?: any): Promise<void> {
         let newInfo: HCAInfo;
         let newSource: Uint8Array | ReadableStreamDefaultReader<Uint8Array>;
         let newBuffer: Uint8Array | undefined = undefined;
@@ -3510,6 +3510,7 @@ class HCAAudioWorkletHCAPlayer {
             }, result: async () => {
                 await this._pause(); // initialized, but it's paused, until being requested to start/play (resume)
                 this.totalFedBlockCount = 0;
+                this.cipher = HCAAudioWorkletHCAPlayer.getCipher(newInfo, key1, key2);
                 this.info = newInfo;
                 this.source = newSource;
                 this.srcBuf = newBuffer;
@@ -3678,11 +3679,10 @@ class HCAWorker {
     }
     async playWholeHCA(hca: Uint8Array, key1?: any, key2?: any, startPlaying = true): Promise<void> {
         if (this.awHcaPlayer == null) {
-            this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca);
+            this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca, key1, key2);
         } else {
-            await this.awHcaPlayer.setSource(hca);
+            await this.awHcaPlayer.setSource(hca, key1, key2);
         }
-        this.awHcaPlayer.setDecryptionKey(key1, key2);
         if (startPlaying) await this.awHcaPlayer.play();
     }
     async playHCAFromURL(url: URL | string, key1?: any, key2?: any, startPlaying = true): Promise<void> {
@@ -3691,11 +3691,10 @@ class HCAWorker {
             url = new URL(url, document.baseURI);
         }
         if (this.awHcaPlayer == null) {
-            this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, url);
+            this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, url, key1, key2);
         } else {
-            await this.awHcaPlayer.setSource(url);
+            await this.awHcaPlayer.setSource(url, key1, key2);
         }
-        this.awHcaPlayer.setDecryptionKey(key1, key2);
         if (startPlaying) await this.awHcaPlayer.play();
     }
     async pausePlaying(): Promise<void> {
