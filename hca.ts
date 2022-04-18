@@ -3299,8 +3299,8 @@ class HCAAudioWorkletHCAPlayer {
         let info: HCAInfo;
         let srcBuf: Uint8Array | undefined = undefined;
         if (source instanceof Uint8Array) {
-            actualSource = source;
-            info = new HCAInfo(source);
+            actualSource = source.slice(0);
+            info = new HCAInfo(actualSource);
         } else if (source instanceof URL) {
             const fetched = await this.getHCAInfoFromURL(source);
             actualSource = fetched.reader;
@@ -3477,8 +3477,8 @@ class HCAAudioWorkletHCAPlayer {
                 }
 
                 if (source instanceof Uint8Array) {
-                    newSource = source;
-                    newInfo = new HCAInfo(source);
+                    newSource = source.slice(0);
+                    newInfo = new HCAInfo(newSource);
                 } else if (source instanceof URL) {
                     try {
                         const result = await HCAAudioWorkletHCAPlayer.getHCAInfoFromURL(source);
