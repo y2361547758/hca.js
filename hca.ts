@@ -2660,11 +2660,11 @@ class HCATaskQueue {
                 task.errMsg = `[${this.origin}] error when applying hook `
                     +`before executing cmd ${task.cmd} from ${task.origin}`;
                 if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
-                this.msgHandler(new MessageEvent("message", {data: task})); // use a fake reply, won't await
+                task.isDummy = true;
             }
             // send task
             if (task.isDummy) {
-                task.result = null;
+                if (!task.hasErr && !task.hasResult) task.result = null;
                 const ev = new MessageEvent("message", {data: task}); // not actually sending, use a fake reply
                 this.msgHandler(ev); // won't await
             } else {
@@ -2752,7 +2752,6 @@ class HCATaskQueue {
     async errHandler(data: any) {
         // irrecoverable error
         if (this._isAlive) {
-            this._isAlive = false;
             // print error message
             console.error(`[${this.origin}] destroying background worker on irrecoverable error`, data);
             // destroy background worker
@@ -2761,6 +2760,8 @@ class HCATaskQueue {
             } catch (e) {
                 console.error(`[${this.origin}] error when trying to destroy()`, e);
             }
+            // after destroy, mark isAlive as false (otherwise sendCmd will fail)
+            this._isAlive = false;
             // reject all pending promises
             for (let taskID in this.callbacks) {
                 const reject = this.callbacks[taskID].reject;
@@ -3480,14 +3481,10 @@ class HCAAudioWorkletHCAPlayer {
                     newSource = source.slice(0);
                     newInfo = new HCAInfo(newSource);
                 } else if (source instanceof URL) {
-                    try {
-                        const result = await HCAAudioWorkletHCAPlayer.getHCAInfoFromURL(source);
-                        newSource = result.reader;
-                        newInfo = result.info;
-                        newBuffer = result.buffer;
-                    } catch (e) {
-                        throw e;
-                    }
+                    const result = await HCAAudioWorkletHCAPlayer.getHCAInfoFromURL(source);
+                    newSource = result.reader;
+                    newInfo = result.info;
+                    newBuffer = result.buffer;
                 } else throw new Error("invalid source");
 
                 // sample rate and channel count is immutable,
