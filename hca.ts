@@ -3181,10 +3181,14 @@ if (typeof document === "undefined") {
 // create & control audio worklet
 class HCAAudioWorkletHCAPlayer {
     private static readonly feedByteMax = 32768;
-    
+
     get isAlive(): boolean {
         return this.taskQueue.isAlive;
     }
+    get initialized(): boolean {
+        return this._initialized;
+    }
+    private _initialized = true; // initially there must be something to play
     private isPlaying = false;
 
     private source?: Uint8Array | ReadableStreamDefaultReader<Uint8Array>;
@@ -3334,7 +3338,10 @@ class HCAAudioWorkletHCAPlayer {
         // create gain node
         const gainNode = audioCtx.createGain();
         // suspend audio context for now
-        await audioCtx.suspend();
+        // in apple webkit it's already suspended & calling suspend yet again will block
+        if (audioCtx.state === "running") {
+            await audioCtx.suspend();
+        }
         // create controller object
         return new HCAAudioWorkletHCAPlayer(selfUrl, audioCtx, hcaPlayerNode, gainNode, feedBlockCount,
             info, actualSource, srcBuf, cipher);
@@ -3512,6 +3519,7 @@ class HCAAudioWorkletHCAPlayer {
                 this.source = newSource;
                 this.srcBuf = newBuffer;
                 this.hasLoop = newInfo.hasHeader["loop"] ? true : false;
+                this._initialized = true; // again we now have something to play
             }
         }}
         await this.taskQueue.execMultiCmd([this.stopCmdItem, initializeCmdItem]); // ensure atomicity
@@ -3545,6 +3553,7 @@ class HCAAudioWorkletHCAPlayer {
             },
             result: async () => {
                 await this._pause(); // can now suspend
+                this._initialized = false; // now we have nothing to play until next setSource
             },
         }
     }
@@ -3559,7 +3568,10 @@ class HCAAudioWorkletHCAPlayer {
                     if (toPlay) task.isDummy = true; // already resumed, not sending cmd
                     // else should still keep playing until "pause" cmd returns
                 } else {
-                    if (toPlay) await this._play();
+                    if (toPlay) {
+                        if (!this._initialized) throw new Error(`not initialized but still attempt to resume`);
+                        await this._play();
+                    }
                     else task.isDummy = true; // already paused, not sending cmd
                 }
                 return task;
@@ -3574,6 +3586,7 @@ class HCAAudioWorkletHCAPlayer {
         await this.setPlaying(false);
     }
     async play(): Promise<void> {
+        // in apple webkit, first call must originate from UI
         await this.setPlaying(true);
     }
     async stop(): Promise<void> {
@@ -3674,25 +3687,17 @@ class HCAWorker {
     async decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0): Promise<Uint8Array> {
         return await this.taskQueue.execCmd("decode", [hca, mode, loop, volume]);
     }
-    async playWholeHCA(hca: Uint8Array, key1?: any, key2?: any, startPlaying = true): Promise<void> {
+    async loadHCAForPlaying(hca: URL | string | Uint8Array, key1?: any, key2?: any): Promise<void> {
+        if (typeof hca === "string") {
+            if (hca === "") throw new Error("empty URL");
+            hca = new URL(hca, document.baseURI);
+        } else if (!(hca instanceof URL) && !(hca instanceof Uint8Array))
+            throw new Error("hca must be either URL or Uint8Array");
         if (this.awHcaPlayer == null) {
             this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca, key1, key2);
         } else {
             await this.awHcaPlayer.setSource(hca, key1, key2);
         }
-        if (startPlaying) await this.awHcaPlayer.play();
-    }
-    async playHCAFromURL(url: URL | string, key1?: any, key2?: any, startPlaying = true): Promise<void> {
-        if (typeof url === "string") {
-            if (url === "") throw new Error("empty URL");
-            url = new URL(url, document.baseURI);
-        }
-        if (this.awHcaPlayer == null) {
-            this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, url, key1, key2);
-        } else {
-            await this.awHcaPlayer.setSource(url, key1, key2);
-        }
-        if (startPlaying) await this.awHcaPlayer.play();
     }
     async pausePlaying(): Promise<void> {
         if (this.awHcaPlayer == null) throw new Error();
