@@ -3076,11 +3076,16 @@ if (typeof document === "undefined") {
                 if (this.ctx.sampleOffset < info.format.droppedHeader) {
                     this.ctx.sampleOffset = info.format.droppedHeader;
                 }
-                if (!hasLoop && this.ctx.sampleOffset >= info.endAtSample) {
-                    // nothing more to play
-                    this.taskQueue.sendCmd("end", []); // not waiting for result
-                    delete this.ctx; // avoid sending "end" cmd for more than one time
-                    return true;
+                if (this.ctx.sampleOffset >= info.endAtSample) {
+                    if (hasLoop) {
+                        // rewind back if beyond loop end
+                        this.ctx.sampleOffset = this.mapToUnLooped(info, this.ctx.sampleOffset);
+                    } else {
+                        // nothing more to play
+                        this.taskQueue.sendCmd("end", []); // not waiting for result
+                        delete this.ctx; // avoid sending "end" cmd for more than one time
+                        return true;
+                    }
                 }
                 // decode block & pull new block (if needed)
                 const mappedStartOffset = this.mapToUnLooped(info, this.ctx.sampleOffset);
@@ -3138,12 +3143,6 @@ if (typeof document === "undefined") {
                     output[channel].set(src);
                 }
                 this.ctx.sampleOffset += copySize;
-                if (hasLoop && this.ctx.sampleOffset > info.endAtSample) {
-                    // it's possible for sampleOffset to overflow because loop is infinite
-                    // rewinding it back to prevent overflow
-                    // (however, Number.MAX_SAFE_INTEGER seems to be able to handle about 64.7 centuries under 44.1kHz)
-                    this.ctx.sampleOffset = this.mapToUnLooped(info, this.ctx.sampleOffset);
-                }
                 return true;
             }
         }
