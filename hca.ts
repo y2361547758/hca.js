@@ -2911,8 +2911,6 @@ if (typeof document === "undefined") {
             }
         }
         class HCAFramePlayer extends AudioWorkletProcessor {
-            private shutdown = false;
-
             private ctx?: HCAFramePlayerContext;
 
             private unsettled: {resolve: (result?: any) => void, counter: number}[] = [];
@@ -2932,9 +2930,6 @@ if (typeof document === "undefined") {
                         switch (task.cmd) {
                             case "nop":
                                 return;
-                            case "shutdown":
-                                this.shutdown = true;
-                                break;
                             case "initialize":
                                 this.ctx = new HCAFramePlayerContext(task.args[0]);
                                 break;
@@ -3043,10 +3038,6 @@ if (typeof document === "undefined") {
             }
 
             process(inputs: Float32Array[][], outputs: Float32Array[][], parameters: AudioWorkletNodeOptions) {
-                if (this.shutdown) {
-                    this.port.close();
-                    return false;
-                }
                 if (this.ctx == null || !this.ctx.isPlaying) {
                     // workaround the "residue" burst noise issue in Chrome
                     const unsettled = this.unsettled.shift();
@@ -3362,11 +3353,6 @@ class HCAAudioWorkletHCAPlayer {
 
     private async _terminate(): Promise<void> {
         // I didn't find terminate() for AudioWorklet so I made one
-        try {
-            this.taskQueue.sendCmd("shutdown", []); // not waiting for result
-        } catch (e) {
-            console.error(`error trying to send shutdown cmd.`, e);
-        }
         try {
             this.hcaPlayerNode.port.close();
         } catch (e) {
