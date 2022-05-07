@@ -8,8 +8,9 @@
     <button disabled id="shutdownbtn">shutdown background worker</button><br>
     <hr>
     <h3>Choose a HCA file</h3>
+    Drag & drop a file here,<br>
     <form id="localfileform">
-        Pick a local file: <input type="file" id="localfile" accept=".hca" onchange="buttons.loadfilebtn = this.files.length > 0"><br>
+        Or pick a local file: <input type="file" id="localfile" accept=".hca" onchange="buttons.loadfilebtn = this.files.length > 0"><br>
     </form>
     <b><u>Don't forget to</u></b> <button disabled id="loadfilebtn">load picked file</button><br>
     Or download from URL: <input type="text" spellcheck="false" id="urlinput" value="bgm01_anime02_hca.hca"><br>
@@ -90,6 +91,9 @@
         var worker = null;
         const hcaJsUrl = new URL("hca.js", document.baseURI);
         var hcaJsObjUrl = null;
+
+        // dragged file
+        var draggedFile = null;
 
         // local file picker
         const localfile = document.getElementById("localfile");
@@ -377,8 +381,15 @@
                 buttons.startworkerbtn = true;
             },
             loadfilebtn: async (self) => {
-                self.textContent = "loading picked file...";
-                let file = localfile.files[0];
+                let file = null;
+                if (draggedFile != null) {
+                    self.textContent = "loading dragged file...";
+                    file = draggedFile;
+                    draggedFile = null;
+                } else {
+                    self.textContent = "loading picked file...";
+                    file = localfile.files[0];
+                }
                 let newFileName = file.name;
                 // update fileName
                 fileName = newFileName;
@@ -713,6 +724,30 @@
                 self.textContent = "Error during " + (isEncrypting ? "encryption" : "decryption");
             }
         }
+        window.addEventListener("dragover", function (ev) {
+            // https://stackoverflow.com/questions/46668079/addeventlistener-drop-not-firing
+            ev.preventDefault();
+        });
+        window.addEventListener("drop", function (ev) {
+            ev.preventDefault();
+            let file = null;
+            const dtItems = ev.dataTransfer.items;
+            const dtFiles = ev.dataTransfer.files;
+            if (dtItems != null && dtItems.length == 1) {
+                // Use DataTransferItemList interface to access the file(s)
+                const item = dtItems[0];
+                if (item.kind === "file") {
+                    file = item.getAsFile();
+                }
+            } else if (dtFiles != null && dtFiles.length == 1) {
+                // Use DataTransfer interface to access the file(s)
+                file = dtFiles[0];
+            }
+            if (file != null) {
+                draggedFile = file;
+                buttons.loadfilebtn = "click";
+            }
+        });
     </script>
 </body>
 </html>
