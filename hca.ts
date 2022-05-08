@@ -3341,7 +3341,7 @@ class HCAAudioWorkletHCAPlayer {
             case "suspended":
                 unlocked = false;
                 console.warn(`audio context for sampleRate=${audioCtx.sampleRate} is suspended/locked,`
-                    +` which can only be resumed/unlocked by UI event. (known behavior of apple webkit)`);
+                    +` which can only be resumed/unlocked by UI event.`);
                 break;
             default:
                 throw new Error(`audio context is neither running nor suspended`);
@@ -3535,10 +3535,10 @@ class HCAAudioWorkletHCAPlayer {
         this.hcaPlayerNode.connect(this.gainNode);
         this.gainNode.connect(this.audioCtx.destination);
         this.isPlaying = true;
-        // mark as unlocked (for apple webkit)
+        // mark as unlocked
         if (!this._unlocked) {
             this._unlocked = true;
-            console.warn(`audio context for sampleRate=${this.audioCtx.sampleRate} is now resumed/unlocked (for apple webkit)`);
+            console.warn(`audio context for sampleRate=${this.audioCtx.sampleRate} is now resumed/unlocked`);
         }
     }
     private async _pause(): Promise<void> {
@@ -3593,6 +3593,7 @@ class HCAAudioWorkletHCAPlayer {
     }
     async play(): Promise<void> {
         // in apple webkit, audio context is suspended/locked initially,
+        // (other browsers like Firefox may have similar but less strict restrictions)
         // to resume/unlock it, first resume() call must be triggered by from UI event,
         // which must not be after await
         await this.setPlaying(true);
