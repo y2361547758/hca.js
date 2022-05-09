@@ -3648,7 +3648,14 @@ class HCAWorker {
         // which obviously defeats the purpose of streaming HCA
         const response = await fetch(selfUrl.href);
         const blob = await response.blob();
-        selfUrl = new URL(URL.createObjectURL(blob));
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        const dataURI = await new Promise((res: (result: string) => void) => {
+            reader.onloadend = function () {
+                res(reader.result as string);
+            }
+        });
+        selfUrl = new URL(dataURI, document.baseURI);
         return new HCAWorker(selfUrl);
     }
     private constructor (selfUrl: URL) {
