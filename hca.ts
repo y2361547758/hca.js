@@ -3621,7 +3621,7 @@ class HCAWorker {
     private readonly selfUrl: URL;
     private readonly taskQueue: HCATaskQueue;
     private hcaWorker: Worker;
-    private awHcaPlayer?: HCAAudioWorkletHCAPlayer;
+    /*private*/ awHcaPlayer?: HCAAudioWorkletHCAPlayer; // FIXME should be private
     private lastTick = 0;
     async shutdown(forcibly = false): Promise<void> {
         if (this.taskQueue.isAlive) await this.taskQueue.shutdown(forcibly);
