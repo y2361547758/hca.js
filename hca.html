@@ -671,6 +671,10 @@
                     case "awloadfromurlbtn":
                         buttons[btnID] = true;
                         break;
+                    case "awresumebtn":
+                    case "awpausebtn":
+                    case "awstopbtn":
+                        break; // do not reset
                     default:
                         buttons[btnID] = false;
                 }
