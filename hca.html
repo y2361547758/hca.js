@@ -22,6 +22,10 @@
     <i>Note: output waveform will be nothing but unpleasant meaningless noise if incorrect keys are given!</i><br>
     <hr>
     <h3>Streaming (<a href="https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet">AudioWorklet API</a>)</h3>
+    <input type="checkbox" checked id="awautoplayondrop">Automatically play drag & dropped HCA file<br>
+    <b><u>Some browsers like Safari (Apple WebKit) may lock AudioContext initially, which blocks auto-play.<br>
+        To unlock AudioContext (so that auto-play will no longer be blocked),<br>
+        please click anywhere on this page after drag & drop.</u></b><br>
     Load a HCA file for playing, which has been fully loaded/downloaded above:<br>
     <button id="awloadwholehcabtn">Load</button><br>
     Load directly from the URL above, without fully downloading the whole file:<br>
@@ -627,6 +631,7 @@
                 self.disabled = false;
             },
         };
+        const _buttons = {};
         for (let id in buttons) {
             let el = document.getElementById(id);
             let onclick = buttons[id];
@@ -647,6 +652,9 @@
                     el.textContent = initialText;
                     el.disabled = !val;
                 },
+            });
+            Object.defineProperty(_buttons, id, {
+                get: function () {return onclick;},
             });
         }
         buttons.startworkerbtn = "click"; // start background worker
@@ -732,6 +740,22 @@
             // https://stackoverflow.com/questions/46668079/addeventlistener-drop-not-firing
             ev.preventDefault();
         });
+        var tryingUnlock = false;
+        function tryUnlock() {
+            if (worker.awHcaPlayer && !worker.awHcaPlayer.unlocked) {
+                // FIXME temporary workaround
+                if (!tryingUnlock) {
+                    tryingUnlock = true;
+                    const id = "awresumebtn";
+                    const el = document.getElementById(id);
+                    el.disabled = true;
+                    _buttons[id](el).then(() => {tryingUnlock = false;});
+                }
+            }
+        }
+        window.addEventListener("click", function (ev) {
+            tryUnlock();
+        });
         window.addEventListener("drop", function (ev) {
             ev.preventDefault();
             let file = null;
@@ -749,7 +773,30 @@
             }
             if (file != null) {
                 draggedFile = file;
-                buttons.loadfilebtn = "click";
+                let btnToClick = ["loadfilebtn", "infobtn"];
+                const autoPlay = document.getElementById("awautoplayondrop").checked;
+                if (autoPlay) {
+                    btnToClick.push("awloadwholehcabtn", "awresumebtn");
+                    //tryUnlock(); // did not seem to work
+                }
+                const iter = btnToClick.values();
+                const clickNextBtn = function () {
+                    let id = iter.next();
+                    if (id.done) return;
+                    id = id.value;
+                    if (typeof id !== "string") throw new Error();
+                    if (id === "awloadwholehcabtn" || id === "awresumebtn") {
+                        if (worker.awHcaPlayer && !worker.awHcaPlayer.unlocked) {
+                            // FIXME temporary workaround
+                            console.warn("awHcaPlayer is still locked, give up before clicking " + id);
+                            return;
+                        }
+                    }
+                    const el = document.getElementById(id);
+                    el.disabled = true;
+                    _buttons[id](el).then(() => {clickNextBtn();});
+                }
+                clickNextBtn();
             }
         });
     </script>
