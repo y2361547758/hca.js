@@ -1,11 +1,15 @@
 #!/bin/bash
 tsc || exit $?
-grep -B999999 'script src="hca.js"' hca.html | grep -v 'script src="hca.js"' > hca-standalone.html
-echo -ne "    <script id=\"hcajs\">\n" >> hca-standalone.html
-cat hca.js >> hca-standalone.html
-echo -ne "    </script>\n" >> hca-standalone.html
-grep -A999999 'script src="hca.js"' hca.html | grep -v 'script src="hca.js"' | \
-grep -B999999 ' const hcaJsUrl ' | grep -v ' const hcaJsUrl ' >> hca-standalone.html
-echo -ne "        const hcaJsUrl = new URL(URL.createObjectURL(new Blob([document.querySelector(\"#hcajs\").textContent], {type: \"text/javascript\"})));\n" >> hca-standalone.html
-grep -A999999 ' const hcaJsUrl ' hca.html | grep -v ' const hcaJsUrl ' >> hca-standalone.html
+cat << "EOF" | node -
+  const fs = require("fs");
+  let html = fs.readFileSync("hca.html", "utf-8");
+  let js = fs.readFileSync("hca.js", "utf-8");
+  let htmlStandalone = html
+    .replace(/ *import .* "\.\/hca\.js".*/, js)
+    .replace(
+      /(\bconst hcaJsUrl = new URL\(")[^"]+(")/,
+      `$1data:text/javascript;base64,${Buffer.from(js).toString('base64')}$2`
+    );
+  fs.writeFileSync("hca-standalone.html", htmlStandalone);
+EOF
 sed -i '/<h1>HCA decoder demo<\/h1>/a\    <i>Standalone version - you may right-click & save this page for offline use.<\/i><br>' hca-standalone.html

@@ -1,4 +1,4 @@
-class HCAInfo {
+export class HCAInfo {
     private rawHeader: Uint8Array;
 
     version = "";
@@ -480,7 +480,7 @@ class HCAUtilFunc
     }
 }
 
-class HCA {
+export class HCA {
     constructor () {
     }
 
@@ -3617,7 +3617,7 @@ class HCAAudioWorkletHCAPlayer {
 }
 
 // create & control worker
-class HCAWorker {
+export class HCAWorker {
     get isAlive(): boolean {
         return this.taskQueue.isAlive;
     }
@@ -3650,7 +3650,11 @@ class HCAWorker {
         // so that HCAAudioWorkletHCAPlayer can only be created after finishing downloading the whole HCA,
         // which obviously defeats the purpose of streaming HCA
         const response = await fetch(selfUrl.href);
-        const blob = await response.blob();
+        // Firefox currently does not support ECMAScript modules in Worker,
+        // therefore we must strip all export declarations
+        const origText = await response.text();
+        const convertedText = origText.replace(/(\n*\s*)export\s+{.*}\s*;*/g, "$1").replace(/(\n*\s*)export\s+/g, "$1");
+        const blob = new Blob([convertedText], {type: "text/javascript"});
         const reader = new FileReader();
         reader.readAsDataURL(blob);
         const dataURI = await new Promise((res: (result: string) => void) => {
@@ -3662,7 +3666,7 @@ class HCAWorker {
         return new HCAWorker(selfUrl);
     }
     private constructor (selfUrl: URL) {
-        this.hcaWorker = new Worker(selfUrl);
+        this.hcaWorker = new Worker(selfUrl, {type: "module"}); // setting type to "module" is currently bogus in Firefox
         this.selfUrl = selfUrl;
         this.taskQueue = new HCATaskQueue("Main-HCAWorker",
             (msg: any, trans: Transferable[]) => this.hcaWorker.postMessage(msg, trans),

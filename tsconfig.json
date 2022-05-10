@@ -1,8 +1,9 @@
 {
   "compilerOptions": {
     "target": "es2015",
-    "module": "commonjs",
+    "module": "ES2015",
     "lib": ["ES2015", "DOM"],
+    "newLine": "lf",
     "strict": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true
