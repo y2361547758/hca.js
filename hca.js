@@ -1,4 +1,3 @@
-"use strict";
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -9,7 +8,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 var _a, _b;
-class HCAInfo {
+export class HCAInfo {
     constructor(hca, changeMask = false, encrypt = false) {
         this.version = "";
         this.dataOffset = 0;
@@ -481,7 +480,7 @@ class HCAUtilFunc {
     }
 }
 HCAUtilFunc.SignedNibbles = [0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1];
-class HCA {
+export class HCA {
     constructor() {
     }
     static decrypt(hca, key1, key2) {
@@ -2350,23 +2349,37 @@ class HCATaskQueue {
     }
     sendNextTask() {
         return __awaiter(this, void 0, void 0, function* () {
-            const task = this.queue.shift();
+            let task = this.queue.shift();
             if (task == null) {
                 this.isIdle = true;
             }
             else {
                 this.isIdle = false;
+                // apply hook first
+                const registered = this.callbacks[task.taskID];
+                const taskHook = registered != null && registered.hook != null && registered.hook.task != null
+                    ? registered.hook.task
+                    : undefined;
+                if (taskHook != null)
+                    try {
+                        task = yield taskHook(task);
+                    }
+                    catch (e) {
+                        task.errMsg = `[${this.origin}] error when applying hook `
+                            + `before executing cmd ${task.cmd} from ${task.origin}`;
+                        if (typeof e === "string" || e instanceof Error)
+                            task.errMsg += "\n" + e.toString();
+                        task.isDummy = true;
+                    }
+                // send task
                 if (task.isDummy) {
-                    // not actually sending, use a fake reply
-                    task.result = null;
-                    this.msgHandler(new MessageEvent("message", { data: task })); // won't await
+                    if (!task.hasErr && !task.hasResult)
+                        task.result = null;
+                    const ev = new MessageEvent("message", { data: task }); // not actually sending, use a fake reply
+                    this.msgHandler(ev); // won't await
                 }
                 else {
-                    const registered = this.callbacks[task.taskID];
-                    const taskHook = registered != null && registered.hook != null && registered.hook.task != null
-                        ? registered.hook.task
-                        : undefined;
-                    this.sendTask(taskHook != null ? yield taskHook(task) : task);
+                    this.sendTask(task);
                 }
             }
         });
@@ -2385,14 +2398,13 @@ class HCATaskQueue {
                         task.result = yield this.taskHandler(task);
                     }
                     catch (e) {
-                        console.error(`[${this.origin}]`, e);
                         // it's observed that Firefox refuses to postMessage an Error object:
                         // "DataCloneError: The object could not be cloned."
                         // (observed in Firefox 97, not clear about other versions)
                         // Chrome doesn't seem to have this problem,
                         // however, in order to keep compatible with Firefox,
                         // we still have to avoid posting an Error object
-                        task.errMsg = `[${this.origin}] error when executing cmd`;
+                        task.errMsg = `[${this.origin}] error when executing cmd ${task.cmd} from ${task.origin}`;
                         if (typeof e === "string" || e instanceof Error)
                             task.errMsg += "\n" + e.toString();
                     }
@@ -2401,7 +2413,7 @@ class HCATaskQueue {
                             this.sendReply(task);
                         }
                         catch (e) {
-                            console.error(`[${this.origin}]`, e);
+                            console.error(`[${this.origin}] sendReply failed.`, e);
                             task.errMsg = (task.errMsg == null ? "" : task.errMsg + "\n\n") + "postMessage from Worker failed";
                             if (typeof e === "string" || e instanceof Error)
                                 task.errMsg += "\n" + e.toString();
@@ -2414,61 +2426,72 @@ class HCATaskQueue {
                     // find & unregister callback
                     const registered = this.callbacks[task.taskID];
                     delete this.callbacks[task.taskID];
+                    // apply hook
+                    let result = task.hasResult ? task.result : undefined;
+                    const hook = registered.hook;
+                    if (hook != null)
+                        try {
+                            if (task.hasErr && hook.error != null)
+                                yield hook.error(task.errMsg);
+                            else if (task.hasResult && hook.result != null)
+                                result = yield hook.result(task.result);
+                        }
+                        catch (e) {
+                            if (!task.hasErr)
+                                task.errMsg = "";
+                            task.errMsg += `[${this.origin}] error when applying hook `
+                                + `after executing cmd ${task.cmd} from ${task.origin}`;
+                            if (typeof e === "string" || e instanceof Error)
+                                task.errMsg += "\n" + e.toString();
+                        }
                     // settle promise
-                    try {
-                        if (task.hasErr) {
-                            const errorHook = registered.hook != null ? registered.hook.error : undefined;
-                            const errMsg = errorHook != null ? yield errorHook(task.errMsg) : task.errMsg;
-                            registered.reject(errMsg);
-                        }
-                        else if (task.hasResult) {
-                            const resultHook = registered.hook != null ? registered.hook.result : undefined;
-                            const result = resultHook != null ? yield resultHook(task.result) : task.result;
-                            registered.resolve(result);
-                        }
-                        else
-                            throw new Error(`task (taskID=${task.taskID} cmd=${task.cmd}) has neither error nor result`);
+                    if (task.hasErr) {
+                        registered.reject(task.errMsg);
                     }
-                    catch (e) {
-                        console.error(`${this.origin}`, e);
+                    else if (task.hasResult) {
+                        registered.resolve(result);
                     }
+                    else
+                        throw new Error(`task (origin=${task.origin} taskID=${task.taskID} cmd=${task.cmd}) `
+                            + `has neither error nor result`); // should never happen
                     // start next task
                     yield this.sendNextTask();
                 }
             }
             catch (e) {
                 // irrecoverable error
-                this.errHandler(e);
+                yield this.errHandler(e);
             }
         });
     }
     errHandler(data) {
-        // irrecoverable error
-        // FIXME triggered in background worker, not notifying foreground main thread
-        if (this._isAlive) {
-            // print error message
-            console.error(`[${this.origin}] destroying background worker on error`, data);
-            // destroy background worker
-            try {
-                this.destroy();
-            }
-            catch (e) {
-                console.error(`[${this.origin}] cannot destroy`, e);
-            }
-            // set isAlive to false - must be after destroy()
-            this._isAlive = false;
-            // reject all pending promises
-            for (let taskID in this.callbacks) {
-                const reject = this.callbacks[taskID].reject;
-                delete this.callbacks[taskID];
+        return __awaiter(this, void 0, void 0, function* () {
+            // irrecoverable error
+            if (this._isAlive) {
+                // print error message
+                console.error(`[${this.origin}] destroying background worker on irrecoverable error`, data);
+                // destroy background worker
                 try {
-                    reject();
+                    yield this.destroy();
                 }
                 catch (e) {
-                    console.error(`[${this.origin}] error rejecting ${taskID}`, e);
+                    console.error(`[${this.origin}] error when trying to destroy()`, e);
+                }
+                // after destroy, mark isAlive as false (otherwise sendCmd will fail)
+                this._isAlive = false;
+                // reject all pending promises
+                for (let taskID in this.callbacks) {
+                    const reject = this.callbacks[taskID].reject;
+                    delete this.callbacks[taskID];
+                    try {
+                        reject();
+                    }
+                    catch (e) {
+                        console.error(`[${this.origin}] error rejecting taskID=${taskID}`, e);
+                    }
                 }
             }
-        }
+        });
     }
     getTransferConfig() {
         return __awaiter(this, void 0, void 0, function* () {
@@ -2546,24 +2569,35 @@ class HCATaskQueue {
         const task = new HCATask(this.origin, HCATaskQueue.discardReplyTaskID, cmd, args, false);
         this.sendTask(task);
     }
-    shutdown() {
+    shutdown(forcibly = false) {
         return __awaiter(this, void 0, void 0, function* () {
             if (this._isAlive) {
-                yield this.execCmd("nop", [], { result: () => {
-                        this.destroy();
-                        this._isAlive = false;
-                    } });
+                if (forcibly) {
+                    try {
+                        yield this.destroy();
+                    }
+                    catch (e) {
+                        console.error(`[${this.origin}] error when trying to forcibly shutdown.`, e);
+                    }
+                    this._isAlive = false;
+                }
+                else
+                    yield this.execCmd("nop", [], { result: () => __awaiter(this, void 0, void 0, function* () {
+                            yield this.destroy();
+                            this._isAlive = false;
+                        }) });
             }
         });
     }
 }
-HCATaskQueue.maxTaskID = 65535;
+HCATaskQueue.maxTaskID = 256; // there's recursion in sendNextTask when making fake reply
 HCATaskQueue.discardReplyTaskID = -1;
 if (typeof document === "undefined") {
     if (typeof onmessage === "undefined") {
         // AudioWorklet
         class HCAFramePlayerContext {
             constructor(procOpts) {
+                this.isPlaying = false;
                 this.defaultPullBlockCount = 128;
                 this.totalPulledBlockCount = 0;
                 this.isPulling = false;
@@ -2600,8 +2634,8 @@ if (typeof document === "undefined") {
         class HCAFramePlayer extends AudioWorkletProcessor {
             constructor(options) {
                 super();
-                this.shutdown = false;
                 this.unsettled = [];
+                this.waitCountDownFrom = 32;
                 if (options == null || options.processorOptions == null)
                     throw new Error();
                 this.ctx = new HCAFramePlayerContext(options.processorOptions);
@@ -2609,25 +2643,66 @@ if (typeof document === "undefined") {
                     switch (task.cmd) {
                         case "nop":
                             return;
-                        case "shutdown":
-                            this.shutdown = true;
-                            break;
                         case "initialize":
                             this.ctx = new HCAFramePlayerContext(task.args[0]);
                             break;
                         case "reset":
                             yield new Promise((resolve) => {
                                 delete this.ctx;
-                                this.unsettled.push({ resolve: resolve, counter: 32 });
+                                this.unsettled.push({ resolve: resolve, counter: this.waitCountDownFrom });
                             });
+                            break;
+                        case "pause":
+                        case "resume":
+                            if (this.ctx == null)
+                                throw new Error(`not initialized`);
+                            this.ctx.isPlaying = task.cmd === "resume";
+                            if (!this.ctx.isPlaying)
+                                yield new Promise((resolve) => {
+                                    this.unsettled.push({ resolve: resolve, counter: this.waitCountDownFrom });
+                                });
                             break;
                         default:
                             throw new Error(`unknown cmd ${task.cmd}`);
                     }
-                }), () => { } // cannot destroy the caller/controller, which is the foreground main thread
-                );
+                }), () => { this.taskQueue.sendCmd("self-destruct", []); });
                 this.taskQueue.configTransfer(true, false);
                 this.port.onmessage = (ev) => this.taskQueue.msgHandler(ev);
+            }
+            handleNewBlocks(ctx, newBlocks) {
+                const info = ctx.frame.Hca;
+                const hasLoop = info.hasHeader["loop"] ? true : false;
+                const pullBlockCount = ctx.pullBlockCount;
+                const encoded = ctx.encoded;
+                if (newBlocks.length % info.blockSize != 0) {
+                    throw new Error(`newBlocks.length=${newBlocks.length} should be multiple of blockSize`);
+                }
+                const newBlockCount = newBlocks.length / info.blockSize;
+                const expected = info.blockSize * pullBlockCount;
+                if (hasLoop) {
+                    let encodedOffset = info.blockSize * ctx.totalPulledBlockCount;
+                    if (encodedOffset + newBlocks.length > encoded.length) {
+                        throw new Error(`has loop header, buffer will overflow`);
+                    }
+                    encoded.set(newBlocks, encodedOffset);
+                }
+                else {
+                    if (newBlocks.length != expected) {
+                        throw new Error(`no loop header, newBlocks.length (${newBlocks.length}) != expected (${expected})`);
+                    }
+                    switch (ctx.totalPulledBlockCount % (pullBlockCount * 2)) {
+                        case 0:
+                            encoded.set(newBlocks);
+                            break;
+                        case pullBlockCount:
+                            encoded.set(newBlocks, expected);
+                            break;
+                        default:
+                            throw new Error();
+                    }
+                }
+                ctx.totalPulledBlockCount += newBlockCount;
+                ctx.isPulling = false;
             }
             pullNewBlocks(ctx) {
                 // if ctx passed in had been actually deleted, it won't affect the current using ctx
@@ -2635,42 +2710,13 @@ if (typeof document === "undefined") {
                     return; // already pulling. will be called again if still not enough
                 ctx.isPulling = true;
                 // request to pull & continue decoding
-                // won't wait for result here, just let resolveHook handle it
-                this.taskQueue.execCmd("pull", [], { result: (newBlocks) => {
-                        const info = ctx.frame.Hca;
-                        const hasLoop = info.hasHeader["loop"] ? true : false;
-                        const pullBlockCount = ctx.pullBlockCount;
-                        const encoded = ctx.encoded;
-                        if (newBlocks.length % info.blockSize != 0) {
-                            throw new Error(`newBlocks.length=${newBlocks.length} should be multiple of blockSize`);
-                        }
-                        const newBlockCount = newBlocks.length / info.blockSize;
-                        const expected = info.blockSize * pullBlockCount;
-                        if (hasLoop) {
-                            let encodedOffset = info.blockSize * ctx.totalPulledBlockCount;
-                            if (encodedOffset + newBlocks.length > encoded.length) {
-                                throw new Error(`has loop header, buffer will overflow`);
-                            }
-                            encoded.set(newBlocks, encodedOffset);
-                        }
-                        else {
-                            if (newBlocks.length != expected) {
-                                throw new Error(`no loop header, newBlocks.length (${newBlocks.length}) != expected (${expected})`);
-                            }
-                            switch (ctx.totalPulledBlockCount % (pullBlockCount * 2)) {
-                                case 0:
-                                    encoded.set(newBlocks);
-                                    break;
-                                case pullBlockCount:
-                                    encoded.set(newBlocks, expected);
-                                    break;
-                                default:
-                                    throw new Error();
-                            }
-                        }
-                        ctx.totalPulledBlockCount += newBlockCount;
-                        ctx.isPulling = false;
-                    } });
+                this.taskQueue.execCmd("pull", [], {
+                    result: (newBlocks) => this.handleNewBlocks(ctx, newBlocks),
+                    error: () => { ctx.isPulling = false; },
+                })
+                    .catch((e) => {
+                    console.warn(`pullNewBlocks failed.`, e);
+                });
             }
             writeToDecodedBuffer(frame, decoded) {
                 const halfSize = HCAFrame.SamplesPerFrame;
@@ -2706,11 +2752,7 @@ if (typeof document === "undefined") {
                 }
             }
             process(inputs, outputs, parameters) {
-                if (this.shutdown) {
-                    this.port.close();
-                    return false;
-                }
-                if (this.ctx == null) {
+                if (this.ctx == null || !this.ctx.isPlaying) {
                     // workaround the "residue" burst noise issue in Chrome
                     const unsettled = this.unsettled.shift();
                     if (unsettled != null) {
@@ -2721,10 +2763,10 @@ if (typeof document === "undefined") {
                                 unsettled.resolve();
                             }
                             catch (e) {
-                                console.error(`error when settling promise of "reset" cmd`);
+                                console.error(`error when settling promise of "reset" or "setPlaying" cmd`);
                             }
                     }
-                    return true; // wait for new source
+                    return true; // wait for new source or resume
                 }
                 const output = outputs[0];
                 const renderQuantumSize = output[0].length;
@@ -2741,11 +2783,17 @@ if (typeof document === "undefined") {
                 if (this.ctx.sampleOffset < info.format.droppedHeader) {
                     this.ctx.sampleOffset = info.format.droppedHeader;
                 }
-                if (!hasLoop && this.ctx.sampleOffset >= info.endAtSample) {
-                    // nothing more to play
-                    this.taskQueue.sendCmd("end", []); // not waiting for result
-                    delete this.ctx; // avoid sending "end" cmd for more than one time
-                    return true;
+                if (this.ctx.sampleOffset >= info.endAtSample) {
+                    if (hasLoop) {
+                        // rewind back if beyond loop end
+                        this.ctx.sampleOffset = this.mapToUnLooped(info, this.ctx.sampleOffset);
+                    }
+                    else {
+                        // nothing more to play
+                        this.taskQueue.sendCmd("end", []); // not waiting for result
+                        delete this.ctx; // avoid sending "end" cmd for more than one time
+                        return true;
+                    }
                 }
                 // decode block & pull new block (if needed)
                 const mappedStartOffset = this.mapToUnLooped(info, this.ctx.sampleOffset);
@@ -2764,7 +2812,13 @@ if (typeof document === "undefined") {
                         let end = start + info.blockSize;
                         if (end > encoded.length)
                             throw new Error("block end offset exceeds buffer size");
-                        HCA.decodeBlock(this.ctx.frame, encoded.subarray(start, end));
+                        try {
+                            HCA.decodeBlock(this.ctx.frame, encoded.subarray(start, end));
+                        }
+                        catch (e) {
+                            console.error(`error decoding block ${endBlockIndex}, filling zero data...`, e);
+                            this.ctx.frame.Channels.forEach((c) => { c.PcmFloat.forEach((sf) => sf.fill(0)); });
+                        }
                         this.writeToDecodedBuffer(this.ctx.frame, this.ctx.decoded);
                         this.ctx.lastDecodedBlockIndex = endBlockIndex;
                         if (this.ctx.totalPulledBlockCount < (hasLoop ? info.loop.end : info.format.blockCount)) {
@@ -2802,12 +2856,6 @@ if (typeof document === "undefined") {
                     output[channel].set(src);
                 }
                 this.ctx.sampleOffset += copySize;
-                if (hasLoop && this.ctx.sampleOffset > info.endAtSample) {
-                    // it's possible for sampleOffset to overflow because loop is infinite
-                    // rewinding it back to prevent overflow
-                    // (however, Number.MAX_SAFE_INTEGER seems to be able to handle about 64.7 centuries under 44.1kHz)
-                    this.ctx.sampleOffset = this.mapToUnLooped(info, this.ctx.sampleOffset);
-                }
                 return true;
             }
         }
@@ -2834,14 +2882,14 @@ if (typeof document === "undefined") {
                 default:
                     throw new Error(`unknown cmd ${task.cmd}`);
             }
-        }, () => { } // cannot destroy the caller/controller, which is the foreground main thread
-        );
+        }, () => { taskQueue.sendCmd("self-destruct", []); });
         onmessage = (ev) => taskQueue.msgHandler(ev);
     }
 }
 // create & control audio worklet
 class HCAAudioWorkletHCAPlayer {
-    constructor(selfUrl, audioCtx, hcaPlayerNode, gainNode, feedBlockCount, info, source, srcBuf) {
+    constructor(selfUrl, audioCtx, unlocked, hcaPlayerNode, gainNode, feedBlockCount, info, source, srcBuf, cipher) {
+        this._initialized = true; // initially there must be something to play
         this.isPlaying = false;
         this.verifyCsum = false;
         this.totalFedBlockCount = 0;
@@ -2852,17 +2900,23 @@ class HCAAudioWorkletHCAPlayer {
                     if (!this.isAlive)
                         throw new Error("dead");
                     if (!this.isPlaying)
-                        yield this._play();
+                        yield this._resume();
                     return task;
                 }),
                 result: () => __awaiter(this, void 0, void 0, function* () {
-                    yield this._pause(); // can now suspend
+                    yield this._suspend(); // can now suspend
+                    this._initialized = false; // now we have nothing to play until next setSource
+                    if (this.source != null && !(this.source instanceof Uint8Array)) {
+                        yield this.source.cancel();
+                        delete this.source;
+                    }
                 }),
             }
         };
         this.selfUrl = selfUrl;
         this.audioCtx = audioCtx;
-        this.taskQueue = new HCATaskQueue("Main-HCAAudioWorkletHCAPlayer", (msg, trans) => hcaPlayerNode.port.postMessage(msg, trans), (task) => this.taskHandler(task), () => this.destroy());
+        this._unlocked = unlocked;
+        this.taskQueue = new HCATaskQueue("Main-HCAAudioWorkletHCAPlayer", (msg, trans) => hcaPlayerNode.port.postMessage(msg, trans), (task) => this.taskHandler(task), () => __awaiter(this, void 0, void 0, function* () { return yield this._terminate(); }));
         hcaPlayerNode.port.onmessage = (ev) => this.taskQueue.msgHandler(ev);
         hcaPlayerNode.port.onmessageerror = (ev) => this.taskQueue.errHandler(ev);
         hcaPlayerNode.onprocessorerror = (ev) => this.taskQueue.errHandler(ev);
@@ -2871,6 +2925,7 @@ class HCAAudioWorkletHCAPlayer {
         this.feedBlockCount = feedBlockCount;
         this.info = info;
         this.source = source;
+        this.cipher = cipher;
         this.srcBuf = srcBuf;
         this.sampleRate = info.format.samplingRate;
         this.channelCount = info.format.channelCount;
@@ -2878,6 +2933,12 @@ class HCAAudioWorkletHCAPlayer {
     }
     get isAlive() {
         return this.taskQueue.isAlive;
+    }
+    get initialized() {
+        return this._initialized;
+    }
+    get unlocked() {
+        return this._unlocked;
     }
     get blockChecksumVerification() {
         return this.verifyCsum;
@@ -2906,6 +2967,10 @@ class HCAAudioWorkletHCAPlayer {
             switch (task.cmd) {
                 case "nop":
                     return;
+                case "self-destruct": // doesn't seem to have a chance to be called
+                    console.error(`HCAFramePlayer requested to self-destruct`);
+                    yield this.taskQueue.shutdown(true);
+                    return;
                 case "end":
                     yield this.stop();
                     return; // actually not sending back reply
@@ -2932,6 +2997,7 @@ class HCAAudioWorkletHCAPlayer {
                         downloadSize = Math.min(downloadSize, maxDownlaodSize);
                         let remaining = downloadSize - this.srcBuf.length;
                         if (remaining > 0) {
+                            // FIXME connection loss is not handled/recovered
                             this.srcBuf = yield HCAAudioWorkletHCAPlayer.readAndAppend(this.source, this.srcBuf, remaining);
                         }
                         if (this.srcBuf.length < size)
@@ -2968,20 +3034,18 @@ class HCAAudioWorkletHCAPlayer {
             }
         });
     }
-    static create(selfUrl, source, feedByteMax = 32768) {
+    static create(selfUrl, source, key1, key2) {
         return __awaiter(this, void 0, void 0, function* () {
             if (!(selfUrl instanceof URL))
                 throw new Error();
             if (!(source instanceof Uint8Array || source instanceof URL))
                 throw new Error();
-            if (typeof feedByteMax !== "number" || isNaN(feedByteMax))
-                throw new Error();
             let actualSource;
             let info;
             let srcBuf = undefined;
             if (source instanceof Uint8Array) {
-                actualSource = source;
-                info = new HCAInfo(source);
+                actualSource = source.slice(0);
+                info = new HCAInfo(actualSource);
             }
             else if (source instanceof URL) {
                 const fetched = yield this.getHCAInfoFromURL(source);
@@ -2991,14 +3055,16 @@ class HCAAudioWorkletHCAPlayer {
             }
             else
                 throw Error();
-            feedByteMax = Math.floor(feedByteMax);
+            let feedByteMax = Math.floor(this.feedByteMax);
             if (feedByteMax < info.blockSize)
                 throw new Error();
             feedByteMax -= feedByteMax % info.blockSize;
             const feedBlockCount = feedByteMax / info.blockSize;
+            // initialize cipher
+            const cipher = this.getCipher(info, key1, key2);
             // create audio context
             const audioCtx = new AudioContext({
-                latencyHint: "playback",
+                //latencyHint: "playback", // FIXME "playback" seems to glitch if switched to background in Android
                 sampleRate: info.format.samplingRate,
             });
             // create audio worklet node (not yet connected)
@@ -3016,65 +3082,64 @@ class HCAAudioWorkletHCAPlayer {
             // create gain node
             const gainNode = audioCtx.createGain();
             // suspend audio context for now
-            yield audioCtx.suspend();
+            // in apple webkit it's already suspended & calling suspend yet again will block
+            let unlocked = true;
+            switch (audioCtx.state) {
+                case "running":
+                    yield audioCtx.suspend();
+                    break;
+                case "suspended":
+                    unlocked = false;
+                    console.warn(`audio context for sampleRate=${audioCtx.sampleRate} is suspended/locked,`
+                        + ` which can only be resumed/unlocked by UI event.`);
+                    break;
+                default:
+                    throw new Error(`audio context is neither running nor suspended`);
+            }
             // create controller object
-            return new HCAAudioWorkletHCAPlayer(selfUrl, audioCtx, hcaPlayerNode, gainNode, feedBlockCount, info, actualSource, srcBuf);
+            return new HCAAudioWorkletHCAPlayer(selfUrl, audioCtx, unlocked, hcaPlayerNode, gainNode, feedBlockCount, info, actualSource, srcBuf, cipher);
         });
     }
-    destroy() {
+    _terminate() {
         return __awaiter(this, void 0, void 0, function* () {
-            if (!this.isAlive) {
-                console.error("already died");
-                return;
-            }
-            try {
-                this.taskQueue.sendCmd("shutdown", []); // not waiting for result
-            }
-            catch (e) {
-                console.error(`cannot send shutdown cmd`);
-            }
+            // I didn't find terminate() for AudioWorklet so I made one
             try {
                 this.hcaPlayerNode.port.close();
             }
             catch (e) {
-                console.error(`cannot close message port`);
+                console.error(`error trying to close message port`, e);
             }
             try {
                 this.hcaPlayerNode.disconnect();
             }
             catch (e) {
-                console.error(`cannot disconnect hcaPlayerNode`);
+                console.error(`error trying to disconnect hcaPlayerNode`, e);
             }
             try {
                 this.gainNode.disconnect();
             }
             catch (e) {
-                console.error(`cannot disconnect gainNode`);
+                console.error(`error trying to disconnect gainNode`, e);
             }
             try {
                 yield this.audioCtx.close();
             }
             catch (e) {
-                console.error(`cannot close audio context`);
+                console.error(`error trying to close audio context`, e);
             }
         });
     }
-    setDecryptionKey(key1, key2) {
-        if (!this.isAlive)
-            throw new Error("dead");
-        switch (this.info.cipher) {
+    static getCipher(info, key1, key2) {
+        switch (info.cipher) {
             case 0:
                 // not encrypted
-                this.cipher = undefined;
-                break;
+                return undefined;
             case 1:
                 // encrypted with "no key"
-                this.cipher = new HCACipher("none"); // ignore given keys
-                break;
+                return new HCACipher("none"); // ignore given keys
             case 0x38:
                 // encrypted with keys - will yield incorrect waveform if incorrect keys are given!
-                this.cipher = new HCACipher(key1, key2);
-                break;
+                return new HCACipher(key1, key2);
             default:
                 throw new Error("unknown ciph.type");
         }
@@ -3089,7 +3154,8 @@ class HCAAudioWorkletHCAPlayer {
             for (let offset = data.length; offset < desired;) {
                 const res = yield reader.read();
                 if (res.done)
-                    throw new Error();
+                    throw new Error(`unexpected stream end. `
+                        + `it is possible that the download has been canceled (by later setSource), or the file data is incomplete`);
                 const bytes = res.value;
                 if (bytes.length > 0) {
                     const required = offset + bytes.length;
@@ -3127,7 +3193,7 @@ class HCAAudioWorkletHCAPlayer {
             };
         });
     }
-    setSource(source) {
+    setSource(source, key1, key2) {
         return __awaiter(this, void 0, void 0, function* () {
             let newInfo;
             let newSource;
@@ -3144,23 +3210,18 @@ class HCAAudioWorkletHCAPlayer {
                                 // FIXME Firefox doesn't seem to abort previous download
                             }
                             catch (e) {
-                                console.error(`error when cancelling previous download`);
+                                console.error(`error when cancelling previous download.`, e);
                             }
                         }
                         if (source instanceof Uint8Array) {
-                            newSource = source;
-                            newInfo = new HCAInfo(source);
+                            newSource = source.slice(0);
+                            newInfo = new HCAInfo(newSource);
                         }
                         else if (source instanceof URL) {
-                            try {
-                                const result = yield HCAAudioWorkletHCAPlayer.getHCAInfoFromURL(source);
-                                newSource = result.reader;
-                                newInfo = result.info;
-                                newBuffer = result.buffer;
-                            }
-                            catch (e) {
-                                throw e;
-                            }
+                            const result = yield HCAAudioWorkletHCAPlayer.getHCAInfoFromURL(source);
+                            newSource = result.reader;
+                            newInfo = result.info;
+                            newBuffer = result.buffer;
                         }
                         else
                             throw new Error("invalid source");
@@ -3173,39 +3234,45 @@ class HCAAudioWorkletHCAPlayer {
                             throw new Error("sample rate mismatch");
                         if (newInfo.format.channelCount != this.channelCount)
                             throw new Error("channel count mismatch");
-                        yield this._play(); // resume it, so that cmd can then be executed
+                        yield this._resume(); // resume it, so that cmd can then be executed
                         const newProcOpts = {
                             rawHeader: newInfo.getRawHeader(),
                             pullBlockCount: this.feedBlockCount,
                         };
                         return new HCATask(task.origin, task.taskID, task.cmd, [newProcOpts], false);
-                    }), result: () => {
+                    }), result: () => __awaiter(this, void 0, void 0, function* () {
+                        yield this._suspend(); // initialized, but it's paused, until being requested to start/play (resume)
                         this.totalFedBlockCount = 0;
+                        this.cipher = HCAAudioWorkletHCAPlayer.getCipher(newInfo, key1, key2);
                         this.info = newInfo;
                         this.source = newSource;
                         this.srcBuf = newBuffer;
                         this.hasLoop = newInfo.hasHeader["loop"] ? true : false;
-                    }
+                        this._initialized = true; // again we now have something to play
+                    })
                 } };
             yield this.taskQueue.execMultiCmd([this.stopCmdItem, initializeCmdItem]); // ensure atomicity
         });
     }
     // not supposed to be used directly
-    _play() {
+    _resume() {
         return __awaiter(this, void 0, void 0, function* () {
             if (!this.isAlive)
                 throw new Error("dead");
             if (this.isPlaying)
                 return;
-            if (this.source == null)
-                throw new Error("nothing to play");
             yield this.audioCtx.resume();
             this.hcaPlayerNode.connect(this.gainNode);
             this.gainNode.connect(this.audioCtx.destination);
             this.isPlaying = true;
+            // mark as unlocked
+            if (!this._unlocked) {
+                this._unlocked = true;
+                console.warn(`audio context for sampleRate=${this.audioCtx.sampleRate} is now resumed/unlocked`);
+            }
         });
     }
-    _pause() {
+    _suspend() {
         return __awaiter(this, void 0, void 0, function* () {
             if (!this.isAlive)
                 throw new Error("dead");
@@ -3217,42 +3284,85 @@ class HCAAudioWorkletHCAPlayer {
             this.isPlaying = false;
         });
     }
-    // wrap with dummy task, in order to ensure atomicity
+    // wraped to ensure atomicity
+    setPlaying(toPlay) {
+        return __awaiter(this, void 0, void 0, function* () {
+            // simlilar to stopCmdItem above, send "pause" cmd to avoid "residue" burst noise
+            yield this.taskQueue.execCmd(toPlay ? "resume" : "pause", [], {
+                task: (task) => __awaiter(this, void 0, void 0, function* () {
+                    if (!this.isAlive)
+                        throw new Error("dead");
+                    if (this.isPlaying) {
+                        if (toPlay)
+                            task.isDummy = true; // already resumed, not sending cmd
+                        // else should still keep playing until "pause" cmd returns
+                    }
+                    else {
+                        if (toPlay) {
+                            if (!this._initialized)
+                                throw new Error(`not initialized but still attempt to resume`);
+                            yield this._resume();
+                        }
+                        else
+                            task.isDummy = true; // already paused, not sending cmd
+                    }
+                    return task;
+                }),
+                result: () => __awaiter(this, void 0, void 0, function* () {
+                    if (toPlay)
+                        yield this._resume();
+                    else
+                        yield this._suspend();
+                })
+            });
+        });
+    }
     pause() {
         return __awaiter(this, void 0, void 0, function* () {
-            yield this.taskQueue.execCmd("nop", [], { task: (task) => {
-                    task.isDummy = true;
-                    return task;
-                }, result: () => __awaiter(this, void 0, void 0, function* () {
-                    yield this._pause();
-                }) });
+            yield this.setPlaying(false);
         });
     }
     play() {
         return __awaiter(this, void 0, void 0, function* () {
-            yield this.taskQueue.execCmd("nop", [], { task: (task) => {
-                    task.isDummy = true;
-                    return task;
-                }, result: () => __awaiter(this, void 0, void 0, function* () {
-                    yield this._play();
-                }) });
+            // in apple webkit, audio context is suspended/locked initially,
+            // (other browsers like Firefox may have similar but less strict restrictions)
+            // to resume/unlock it, first resume() call must be triggered by from UI event,
+            // which must not be after await
+            yield this.setPlaying(true);
         });
     }
-    // not a dummy task, but similarly, wrapped to ensure atomicity
     stop() {
         return __awaiter(this, void 0, void 0, function* () {
+            // can unlock the locked audio context as well because it's resumed firstly before finally suspended
             const item = this.stopCmdItem;
             yield this.taskQueue.execCmd(item.cmd, item.args, item.hook);
         });
     }
+    shutdown(forcibly = false) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.isAlive) {
+                console.error(`already shutdown`);
+                return;
+            }
+            yield this.taskQueue.shutdown(forcibly);
+        });
+    }
 }
+HCAAudioWorkletHCAPlayer.feedByteMax = 32768;
 // create & control worker
-class HCAWorker {
+export class HCAWorker {
     constructor(selfUrl) {
         this.lastTick = 0;
-        this.hcaWorker = new Worker(selfUrl);
+        this.hcaWorker = new Worker(selfUrl, { type: "module" }); // setting type to "module" is currently bogus in Firefox
         this.selfUrl = selfUrl;
-        this.taskQueue = new HCATaskQueue("Main-HCAWorker", (msg, trans) => this.hcaWorker.postMessage(msg, trans), () => { }, () => this.hcaWorker.terminate());
+        this.taskQueue = new HCATaskQueue("Main-HCAWorker", (msg, trans) => this.hcaWorker.postMessage(msg, trans), (task) => __awaiter(this, void 0, void 0, function* () {
+            switch (task.cmd) {
+                case "self-destruct": // doesn't seem to have a chance to be called
+                    console.error(`hcaWorker requested to self-destruct`);
+                    yield this.taskQueue.shutdown(true);
+                    break;
+            }
+        }), () => this.hcaWorker.terminate());
         this.hcaWorker.onmessage = (msg) => this.taskQueue.msgHandler(msg);
         this.hcaWorker.onerror = (msg) => this.taskQueue.errHandler(msg);
         this.hcaWorker.onmessageerror = (msg) => this.taskQueue.errHandler(msg);
@@ -3260,13 +3370,12 @@ class HCAWorker {
     get isAlive() {
         return this.taskQueue.isAlive;
     }
-    shutdown() {
+    shutdown(forcibly = false) {
         return __awaiter(this, void 0, void 0, function* () {
-            if (this.taskQueue.isAlive) {
-                yield this.taskQueue.shutdown();
-                if (this.awHcaPlayer != null)
-                    this.awHcaPlayer.destroy();
-            }
+            if (this.taskQueue.isAlive)
+                yield this.taskQueue.shutdown(forcibly);
+            if (this.awHcaPlayer != null && this.awHcaPlayer.isAlive)
+                yield this.awHcaPlayer.shutdown(forcibly);
         });
     }
     tick() {
@@ -3296,8 +3405,19 @@ class HCAWorker {
             // so that HCAAudioWorkletHCAPlayer can only be created after finishing downloading the whole HCA,
             // which obviously defeats the purpose of streaming HCA
             const response = yield fetch(selfUrl.href);
-            const blob = yield response.blob();
-            selfUrl = new URL(URL.createObjectURL(blob));
+            // Firefox currently does not support ECMAScript modules in Worker,
+            // therefore we must strip all export declarations
+            const origText = yield response.text();
+            const convertedText = origText.replace(/(\n*\s*)export\s+{.*}\s*;*/g, "$1").replace(/(\n*\s*)export\s+/g, "$1");
+            const blob = new Blob([convertedText], { type: "text/javascript" });
+            const reader = new FileReader();
+            reader.readAsDataURL(blob);
+            const dataURI = yield new Promise((res) => {
+                reader.onloadend = function () {
+                    res(reader.result);
+                };
+            });
+            selfUrl = new URL(dataURI, document.baseURI);
             return new HCAWorker(selfUrl);
         });
     }
@@ -3347,30 +3467,21 @@ class HCAWorker {
             return yield this.taskQueue.execCmd("decode", [hca, mode, loop, volume]);
         });
     }
-    playWholeHCA(hca, key1, key2) {
+    loadHCAForPlaying(hca, key1, key2) {
         return __awaiter(this, void 0, void 0, function* () {
+            if (typeof hca === "string") {
+                if (hca === "")
+                    throw new Error("empty URL");
+                hca = new URL(hca, document.baseURI);
+            }
+            else if (!(hca instanceof URL) && !(hca instanceof Uint8Array))
+                throw new Error("hca must be either URL or Uint8Array");
             if (this.awHcaPlayer == null) {
-                this.awHcaPlayer = yield HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca);
+                this.awHcaPlayer = yield HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca, key1, key2);
             }
             else {
-                yield this.awHcaPlayer.setSource(hca);
+                yield this.awHcaPlayer.setSource(hca, key1, key2);
             }
-            this.awHcaPlayer.setDecryptionKey(key1, key2);
-            yield this.awHcaPlayer.play();
-        });
-    }
-    playHCAFromURL(url, key1, key2) {
-        return __awaiter(this, void 0, void 0, function* () {
-            if (typeof url === "string")
-                url = new URL(url, document.baseURI);
-            if (this.awHcaPlayer == null) {
-                this.awHcaPlayer = yield HCAAudioWorkletHCAPlayer.create(this.selfUrl, url);
-            }
-            else {
-                yield this.awHcaPlayer.setSource(url);
-            }
-            this.awHcaPlayer.setDecryptionKey(key1, key2);
-            yield this.awHcaPlayer.play();
         });
     }
     pausePlaying() {

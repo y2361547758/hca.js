@@ -82,8 +82,10 @@
     <button disabled id="decodebtn">decode</button><br>
     <audio id="audioElement" controls></audio>
     <!-- <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.8.3/dist/ffmpeg.min.js"></script> -->
-    <script src="hca.js"></script>
-    <script>
+    <script type="module">
+        const hcaJsUrl = new URL("hca.js", document.baseURI);
+        var hcaJsModule, hcaJsObjUrl, HCAInfo, HCAWorker;
+
         // mime types
         const defMimeType = "application/octet-stream";
         const mimeTypeMap = {
@@ -93,8 +95,6 @@
 
         // HCAWorker instance
         var worker = null;
-        const hcaJsUrl = new URL("hca.js", document.baseURI);
-        var hcaJsObjUrl = null;
 
         // dragged file
         var draggedFile = null;
@@ -366,9 +366,14 @@
                 if (worker == null) {
                     if (hcaJsObjUrl == null) {
                         const response = await fetch(hcaJsUrl.href);
-                        const blob = await response.blob();
+                        const blob = new Blob([await response.arrayBuffer()], {type: "text/javascript"});
                         hcaJsObjUrl = URL.createObjectURL(blob);
                     }
+                    if (hcaJsModule == null) {
+                        hcaJsModule = await import(hcaJsObjUrl);
+                    }
+                    if (HCAInfo == null) HCAInfo = hcaJsModule.HCAInfo;
+                    if (HCAWorker == null) HCAWorker = hcaJsModule.HCAWorker;
                     worker = await HCAWorker.create(hcaJsObjUrl);
                     console.log("started background worker");
                 }
