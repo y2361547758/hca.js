@@ -3505,7 +3505,7 @@ class HCAAudioWorkletHCAPlayer {
                 if (newInfo.format.channelCount != this.channelCount)
                     throw new Error("channel count mismatch");
 
-                await this._play(); // resume it, so that cmd can then be executed
+                await this._resume(); // resume it, so that cmd can then be executed
 
                 const newProcOpts = {
                     rawHeader: newInfo.getRawHeader(),
@@ -3513,7 +3513,7 @@ class HCAAudioWorkletHCAPlayer {
                 };
                 return new HCATask(task.origin, task.taskID, task.cmd, [newProcOpts], false);
             }, result: async () => {
-                await this._pause(); // initialized, but it's paused, until being requested to start/play (resume)
+                await this._suspend(); // initialized, but it's paused, until being requested to start/play (resume)
                 this.totalFedBlockCount = 0;
                 this.cipher = HCAAudioWorkletHCAPlayer.getCipher(newInfo, key1, key2);
                 this.info = newInfo;
@@ -3527,10 +3527,9 @@ class HCAAudioWorkletHCAPlayer {
     }
 
     // not supposed to be used directly
-    private async _play(): Promise<void> {
+    private async _resume(): Promise<void> {
         if (!this.isAlive) throw new Error("dead");
         if (this.isPlaying) return;
-        if (this.source == null) throw new Error("nothing to play");
         await this.audioCtx.resume();
         this.hcaPlayerNode.connect(this.gainNode);
         this.gainNode.connect(this.audioCtx.destination);
@@ -3541,7 +3540,7 @@ class HCAAudioWorkletHCAPlayer {
             console.warn(`audio context for sampleRate=${this.audioCtx.sampleRate} is now resumed/unlocked`);
         }
     }
-    private async _pause(): Promise<void> {
+    private async _suspend(): Promise<void> {
         if (!this.isAlive) throw new Error("dead");
         if (!this.isPlaying) return;
         this.hcaPlayerNode.disconnect();
@@ -3554,12 +3553,16 @@ class HCAAudioWorkletHCAPlayer {
         cmd: "reset", args: [], hook: {
             task: async (task: HCATask) => {
                 if (!this.isAlive) throw new Error("dead");
-                if (!this.isPlaying) await this._play();
+                if (!this.isPlaying) await this._resume();
                 return task;
             },
             result: async () => {
-                await this._pause(); // can now suspend
+                await this._suspend(); // can now suspend
                 this._initialized = false; // now we have nothing to play until next setSource
+                if (this.source != null && !(this.source instanceof Uint8Array)) {
+                    await this.source.cancel();
+                    delete this.source;
+                }
             },
         }
     }
@@ -3576,15 +3579,15 @@ class HCAAudioWorkletHCAPlayer {
                 } else {
                     if (toPlay) {
                         if (!this._initialized) throw new Error(`not initialized but still attempt to resume`);
-                        await this._play();
+                        await this._resume();
                     }
                     else task.isDummy = true; // already paused, not sending cmd
                 }
                 return task;
             },
             result: async () => {
-                if (toPlay) await this._play();
-                else await this._pause();
+                if (toPlay) await this._resume();
+                else await this._suspend();
             }
         });
     }
