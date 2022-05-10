@@ -682,7 +682,9 @@
                     case "awresumebtn":
                     case "awpausebtn":
                     case "awstopbtn":
-                        break; // do not reset
+                        // do not reset except on refresh
+                        if (exceptBtnID == null) buttons[btnID] = false;
+                        break;
                     default:
                         buttons[btnID] = false;
                 }
