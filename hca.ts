@@ -2398,7 +2398,9 @@ class HCACipher {
             case "string":
                 // avoid ambiguity: always treat as hex
                 if (!key.match(/^0x/)) key = "0x" + key;
-                return parseInt(key);
+                key = parseInt(key);
+                if (isNaN(key)) throw new Error("cannot parse as integer");
+                return key;
             case "object":
                 // avoid endianness ambiguity: only accepting Uint8Array, then read as little endian
                 if (key instanceof Uint8Array && key.byteLength == 4) {
@@ -2429,7 +2431,7 @@ class HCACipher {
             default:
                 key1 = HCACipher.parseKey(key1);
                 if (key2 == null) {
-                    key2 = key1 >> 32;
+                    key2 = 0;
                 } else {
                     key2 = HCACipher.parseKey(key2);
                 }

@@ -47,11 +47,11 @@ let wav = HCA.decode(decryptedHca);
 
 Decrypt/encrypt & return the whole HCA file **in-place** with specified keys - in other words, if you don't want the input HCA    to be overwritten, you must pass in something like `hca.slice(0)`, which makes a new copy in a newly allocated buffer.
 
- - `key1` is **not optional**; but `key2` is *optional* in the following either case that:
+ - `key1` is **not optional**.
 
-   1. `key1` (as an unsigned 64-bit integer) already contains `key2`, where the higher 32 bits is the key2;
+   1. If `key2` is not given, it defaults to zero.
 
-   2. `key1` is `"nokey"` or `"defaultkey"`, which indicates either the encryption/decryption should be done in \"no key\" mode,    or the hard-coded default keys (allegedly for Magia Record) should be used for encryption/decryption.
+   2. If `key1` is `"nokey"` or `"defaultkey"`, `key2` is then ignored. Setting `key1` to `"nokey"` means the encryption/decryption should be done in \"no key\" mode. Setting `key1` to `"defaultkey"` means the hard-coded default keys (allegedly for Magia Record) should be used for encryption/decryption.
 
  - **Already-encrypted HCA cannot be directly re-encrypted.** You may check whether an HCA is already encrypted with something    like:
 
