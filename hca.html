@@ -10,7 +10,7 @@
     <h3>Choose a HCA file</h3>
     Drag & drop a file here,<br>
     <form id="localfileform">
-        Or pick a local file: <input type="file" id="localfile" accept=".hca,application/octet-stream" onchange="buttons.loadfilebtn = this.files.length > 0"><br>
+        Or pick a local file: <input type="file" id="localfile" accept=".hca,application/octet-stream"><br>
     </form>
     <b><u>Don't forget to</u></b> <button disabled id="loadfilebtn">load picked file</button><br>
     Or download from URL: <input type="text" spellcheck="false" id="urlinput" value="bgm01_anime02_hca.hca"><br>
@@ -102,6 +102,8 @@
         // local file picker
         const localfile = document.getElementById("localfile");
         const localfileform = document.getElementById("localfileform");
+        // onchange does not work on iOS Safari
+        localfile.addEventListener("change", function (ev) {buttons.loadfilebtn = this.files.length > 0;});
         // reset state on refresh
         // https://bugzilla.mozilla.org/show_bug.cgi?id=685657
         localfileform.reset();
@@ -406,11 +408,18 @@
                 clearAllData();
                 resetButtonsExcept(self.id);
                 // update data
-                let ab = await file.arrayBuffer();
+                let ab;
+                if (file.arrayBuffer == null) {
+                    let objUrl = URL.createObjectURL(file);
+                    let resp = await fetch(objUrl);
+                    URL.revokeObjectURL(objUrl);
+                    ab = await resp.arrayBuffer();
+                } else {
+                    ab = await file.arrayBuffer();
+                }
                 hcaFileData.original.data = new Uint8Array(ab);
                 self.textContent = "load picked file (successful)";
-                // let the button bounce
-                self.disabled = false;
+                // no need to let the button bounce
                 // next step
                 buttons.awloadwholehcabtn = true;
                 buttons.infobtn = true;
