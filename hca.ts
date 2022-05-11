@@ -3665,10 +3665,18 @@ export class HCAWorker {
             }
         });
         selfUrl = new URL(dataURI, document.baseURI);
-        return new HCAWorker(selfUrl);
+        return new HCAWorker(selfUrl, blob);
     }
-    private constructor (selfUrl: URL) {
-        this.hcaWorker = new Worker(selfUrl, {type: "module"}); // setting type to "module" is currently bogus in Firefox
+    private constructor (selfUrl: URL, selfBlob?: Blob) {
+        try {
+            this.hcaWorker = new Worker(selfUrl, {type: "module"}); // setting type to "module" is currently bogus in Firefox
+        } catch (e) {
+            // workaround for legacy iOS Safari
+            if (selfBlob == null || !(selfBlob instanceof Blob)) throw e;
+            const objUrl = URL.createObjectURL(selfBlob);
+            this.hcaWorker = new Worker(objUrl, {type: "module"});
+            URL.revokeObjectURL(objUrl);
+        }
         this.selfUrl = selfUrl;
         this.taskQueue = new HCATaskQueue("Main-HCAWorker",
             (msg: any, trans: Transferable[]) => this.hcaWorker.postMessage(msg, trans),
