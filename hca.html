@@ -21,6 +21,20 @@
     key2=<input type="text" spellcheck="false" id="key2input" value="0x00000000"><br>
     <i>Note: output waveform will be nothing but unpleasant meaningless noise if incorrect keys are given!</i><br>
     <hr>
+    <h3>Streaming (<a href="https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet">AudioWorklet API</a>)</h3>
+    <input type="checkbox" checked id="awautoplayondrop">Automatically play drag & dropped HCA file<br>
+    <b><u>Some browsers like Safari (Apple WebKit) may lock AudioContext initially, which blocks auto-play.<br>
+        To unlock AudioContext (so that auto-play will no longer be blocked),<br>
+        please click anywhere on this page after drag & drop.</u></b><br>
+    Load a HCA file for playing, which has been fully loaded/downloaded above:<br>
+    <button id="awloadwholehcabtn">Load</button><br>
+    Load directly from the URL above, without fully downloading the whole file:<br>
+    <button id="awloadfromurlbtn">Load</button><br>
+    Progress control:<br>
+    <button id="awresumebtn">Play/Resume</button><br>
+    <button id="awpausebtn">Pause</button><br>
+    <button id="awstopbtn">Stop</button><br>
+    <hr>
     <h3>Decode the whole file</h3>
     Decoding mode: <input type="number" step="8" min="0" max="32" placeholder="0-99" id="decodingmodeinput" value="16"><br>
     Loop count: <input type="number" step="1" min="0" max="99" placeholder="0-99" id="loopcountinput" value="0"><br>
@@ -398,6 +412,7 @@
                 // let the button bounce
                 self.disabled = false;
                 // next step
+                buttons.awloadwholehcabtn = true;
                 buttons.infobtn = true;
                 buttons.fixcsumbtn = true;
             },
@@ -463,8 +478,81 @@
                 // let the button bounce
                 self.disabled = false;
                 // next step
+                buttons.awloadwholehcabtn = true;
                 buttons.infobtn = true;
                 buttons.fixcsumbtn = true;
+            },
+            awloadwholehcabtn: async (self) => {
+                try {
+                    await worker.loadHCAForPlaying(hcaFileData.original.data, keys.key1, keys.key2);
+                    self.textContent = "Load (successful)";
+                } catch (e) {
+                    self.textContent = "Load (failed)";
+                    console.error(e);
+                }
+                // let the button bounce
+                self.disabled = false;
+                // next step
+                buttons.awpausebtn = false;
+                buttons.awresumebtn = true;
+                buttons.awstopbtn = true;
+                // TODO pause/rewind/fast-forward etc
+            },
+            awloadfromurlbtn: async (self) => {
+                try {
+                    await worker.loadHCAForPlaying(urlinput.value, keys.key1, keys.key2);
+                    self.textContent = "Load (successful)";
+                } catch (e) {
+                    self.textContent = "Load (failed)";
+                    console.error(e);
+                }
+                // let the button bounce
+                self.disabled = false;
+                // next step
+                buttons.awpausebtn = false;
+                buttons.awresumebtn = true;
+                buttons.awstopbtn = true;
+                // TODO rewind/fast-forward etc
+            },
+            awpausebtn: async (self) => {
+                try {
+                    await worker.pausePlaying();
+                    self.textContent = "Paused";
+                } catch (e) {
+                    self.textContent = "Pause (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.awresumebtn = true;
+            },
+            awresumebtn: async (self) => {
+                try {
+                    await worker.resumePlaying();
+                    self.textContent = "Playing/Resumed";
+                } catch (e) {
+                    self.textContent = "Play/Resume (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.awpausebtn = true;
+            },
+            awstopbtn: async (self) => {
+                try {
+                    await worker.stopPlaying();
+                    self.textContent = "Stopped";
+                } catch (e) {
+                    self.textContent = "Stop (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.awpausebtn = false;
+                buttons.awresumebtn = false;
             },
             infobtn: async (self) => {
                 let hca = hcaFileData[
@@ -590,6 +678,18 @@
                     case "downloadbtn":
                         buttons[btnID] = true;
                         break;
+                    case "awloadwholehcabtn":
+                        buttons[btnID] = false;
+                        break;
+                    case "awloadfromurlbtn":
+                        buttons[btnID] = true;
+                        break;
+                    case "awresumebtn":
+                    case "awpausebtn":
+                    case "awstopbtn":
+                        // do not reset except on refresh
+                        if (exceptBtnID == null) buttons[btnID] = false;
+                        break;
                     default:
                         buttons[btnID] = false;
                 }
@@ -643,6 +743,69 @@
                 self.textContent = "Error during " + (isEncrypting ? "encryption" : "decryption");
             }
         }
+        window.addEventListener("dragover", function (ev) {
+            // https://stackoverflow.com/questions/46668079/addeventlistener-drop-not-firing
+            ev.preventDefault();
+        });
+        var tryingUnlock = false;
+        function tryUnlock() {
+            if (worker.awHcaPlayer && !worker.awHcaPlayer.unlocked) {
+                // FIXME temporary workaround
+                if (!tryingUnlock) {
+                    tryingUnlock = true;
+                    const id = "awresumebtn";
+                    const el = document.getElementById(id);
+                    el.disabled = true;
+                    _buttons[id](el).then(() => {tryingUnlock = false;});
+                }
+            }
+        }
+        window.addEventListener("click", function (ev) {
+            tryUnlock();
+        });
+        window.addEventListener("drop", function (ev) {
+            ev.preventDefault();
+            let file = null;
+            const dtItems = ev.dataTransfer.items;
+            const dtFiles = ev.dataTransfer.files;
+            if (dtItems != null && dtItems.length == 1) {
+                // Use DataTransferItemList interface to access the file(s)
+                const item = dtItems[0];
+                if (item.kind === "file") {
+                    file = item.getAsFile();
+                }
+            } else if (dtFiles != null && dtFiles.length == 1) {
+                // Use DataTransfer interface to access the file(s)
+                file = dtFiles[0];
+            }
+            if (file != null) {
+                draggedFile = file;
+                let btnToClick = ["loadfilebtn", "infobtn"];
+                const autoPlay = document.getElementById("awautoplayondrop").checked;
+                if (autoPlay) {
+                    btnToClick.push("awloadwholehcabtn", "awresumebtn");
+                    //tryUnlock(); // did not seem to work
+                }
+                const iter = btnToClick.values();
+                const clickNextBtn = function () {
+                    let id = iter.next();
+                    if (id.done) return;
+                    id = id.value;
+                    if (typeof id !== "string") throw new Error();
+                    if (id === "awloadwholehcabtn" || id === "awresumebtn") {
+                        if (worker.awHcaPlayer && !worker.awHcaPlayer.unlocked) {
+                            // FIXME temporary workaround
+                            console.warn("awHcaPlayer is still locked, give up before clicking " + id);
+                            return;
+                        }
+                    }
+                    const el = document.getElementById(id);
+                    el.disabled = true;
+                    _buttons[id](el).then(() => {clickNextBtn();});
+                }
+                clickNextBtn();
+            }
+        });
     </script>
 </body>
 </html>
