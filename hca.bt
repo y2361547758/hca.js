@@ -106,8 +106,8 @@ typedef struct {
 	char r02;
 	char count1;
 	char count2;
-	char r03;
-	char r04;
+	byte r03 : 4;
+	byte r04 : 4;
 	char enableCount2;
 } stDecode <read=decodeRead>;
 string decodeRead(stDecode& o) {
