@@ -12,6 +12,8 @@
     Drag & drop a file here,<br>
     <form id="localfileform">
         Or pick a local file: <input type="file" id="localfile" accept=".hca,application/octet-stream"><br>
+        <input type="checkbox" id="hcaonly" checked>
+        <label for="hcaonly">pick HCA file only (uncheck if unable to pick)</label><br>
     </form>
     <b><u>Don't forget to</u></b> <button disabled id="loadfilebtn">load picked file</button><br>
     Or download from URL: <input type="text" spellcheck="false" id="urlinput" value="bgm01_anime02_hca.hca"><br>
@@ -23,7 +25,8 @@
     <i>Note: output waveform will be nothing but unpleasant meaningless noise if incorrect keys are given!</i><br>
     <hr>
     <h3>Streaming (<a href="https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet">AudioWorklet API</a>)</h3>
-    <input type="checkbox" checked id="awautoplayondrop">Automatically play drag & dropped HCA file<br>
+    <input type="checkbox" checked id="awautoplayondrop">
+    <label for="awautoplyondrop">Automatically play drag & dropped HCA file</label><br>
     <b><u>Some browsers like Safari (Apple WebKit) may lock AudioContext initially, which blocks auto-play.<br>
         To unlock AudioContext (so that auto-play will no longer be blocked),<br>
         please click anywhere on this page after drag & drop.</u></b><br>
@@ -108,6 +111,10 @@
         // reset state on refresh
         // https://bugzilla.mozilla.org/show_bug.cgi?id=685657
         localfileform.reset();
+        // workaround for iOS Safari file picker
+        document.getElementById("hcaonly").addEventListener("change", function(ev) {
+            localfile.accept = ev.target.checked ? ".hca,application/octet-stream" : "";
+        });
 
         // input HCA URL
         const urlinput = document.getElementById("urlinput");
