@@ -563,6 +563,7 @@ export class HCA {
         let inWavSize = info.calcInWavSize(mode);
 
         // decode blocks (frames)
+        let failedBlocks = [], lastError = undefined;
         for (let i = 0, offset = 0; i < info.format.blockCount; i++) {
             let lastDecodedSamples = i * HCAFrame.SamplesPerFrame;
             let currentDecodedSamples = lastDecodedSamples + HCAFrame.SamplesPerFrame;
@@ -571,7 +572,13 @@ export class HCA {
             }
             let startOffset = info.dataOffset + info.blockSize * i;
             let block = hca.subarray(startOffset, startOffset + info.blockSize);
-            this.decodeBlock(frame, block);
+            try {
+                this.decodeBlock(frame, block);
+            } catch (e) {
+                failedBlocks.push(i);
+                lastError = e;
+                frame = new HCAFrame(info);
+            }
             let wavebuff: Uint8Array;
             if (lastDecodedSamples < info.startAtSample || currentDecodedSamples > info.endAtSample) {
                 // crossing startAtSample/endAtSample, skip/drop specified bytes
@@ -588,6 +595,9 @@ export class HCA {
                 wavebuff = this.writeToPCM(frame, mode, volume, dataPart, offset);
             }
             offset += wavebuff.byteLength;
+        }
+        if (failedBlocks.length > 0) {
+            console.error(`error decoding following blocks, filled zero`, failedBlocks, lastError);
         }
 
         // decoding done, then just copy looping part
@@ -2873,6 +2883,11 @@ if (typeof document === "undefined") {
 
             frame: HCAFrame;
 
+            failedBlocks: Array<number> = [];
+            lastError?: any;
+            readonly printErrorCountDownFrom = 256;
+            printErrorCountDown = this.printErrorCountDownFrom;
+
             // if loop header exists, all blocks (up to loop end) are stored in encoded buffer,
             // otherwise, only 2 * pullBlockCount blocks are stored in encoded buffer
             encoded: Uint8Array;
@@ -3054,6 +3069,14 @@ if (typeof document === "undefined") {
                     return true; // wait for new source or resume
                 }
 
+                if (this.ctx.failedBlocks.length > 0) {
+                    if (this.ctx.failedBlocks.length >= 64 || --this.ctx.printErrorCountDown <= 0) {
+                        console.error(`error decoding following blocks`, this.ctx.failedBlocks, this.ctx.lastError);
+                        this.ctx.failedBlocks = []; this.ctx.lastError = undefined;
+                        this.ctx.printErrorCountDown = this.ctx.printErrorCountDownFrom;
+                    }
+                }
+
                 const output = outputs[0];
                 const renderQuantumSize = output[0].length;
                 const samplesPerBlock = HCAFrame.SamplesPerFrame;
@@ -3099,7 +3122,8 @@ if (typeof document === "undefined") {
                         try {
                             HCA.decodeBlock(this.ctx.frame, encoded.subarray(start, end));
                         } catch (e) {
-                            console.error(`error decoding block ${endBlockIndex}, filling zero data...`, e);
+                            this.ctx.failedBlocks.push(endBlockIndex);
+                            this.ctx.lastError = e;
                             this.ctx.frame.Channels.forEach((c) => {c.PcmFloat.forEach((sf) => sf.fill(0))});
                         }
                         this.writeToDecodedBuffer(this.ctx.frame, this.ctx.decoded);
