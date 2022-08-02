@@ -55,8 +55,12 @@ export class HCAInfo {
     loopStartAtSample = 0;
     loopEndAtSample = 0;
     loopSampleCount = 0;
+    loopStartTime = 0; // in seconds
+    loopEndTime = 0; // in seconds
+    loopDuration = 0; // in seconds
     endAtSample = 0;
     sampleCount = 0;
+    duration = 0; // in seconds
     // full file size / data part (excluding header, just blocks/frames) size
     fullSize = 0;
     dataSize = 0;
@@ -226,9 +230,13 @@ export class HCAInfo {
             this.loopStartAtSample = this.loop.start * HCAFrame.SamplesPerFrame + this.loop.droppedHeader;
             this.loopEndAtSample = (this.loop.end + 1) * HCAFrame.SamplesPerFrame - this.loop.droppedFooter;
             this.loopSampleCount = this.loopEndAtSample - this.loopStartAtSample;
+            this.loopStartTime = (this.loopStartAtSample - this.startAtSample) / this.format.samplingRate;
+            this.loopDuration = this.loopSampleCount / this.format.samplingRate;
+            this.loopEndTime = this.loopStartTime + this.loopDuration;
         }
         this.endAtSample = this.hasHeader["loop"] ? this.loopEndAtSample : this.fullEndAtSample;
         this.sampleCount = this.endAtSample - this.startAtSample;
+        this.duration = this.sampleCount / this.format.samplingRate;
         // calculate file/data size
         this.dataSize = this.blockSize * this.format.blockCount;
         this.fullSize = this.dataOffset + this.dataSize;
@@ -248,6 +256,7 @@ export class HCAInfo {
             0 <= this.startAtSample,
             this.startAtSample < this.fullEndAtSample,
             this.fullEndAtSample <= this.fullSampleCount,
+            this.duration > 0,
         ];
         results.find((result, index) => {
             if (!result) {
@@ -259,6 +268,9 @@ export class HCAInfo {
                 this.startAtSample <= this.loopStartAtSample,
                 this.loopStartAtSample < this.loopEndAtSample,
                 this.loopEndAtSample <= this.fullEndAtSample,
+                0 <= this.loopStartTime,
+                this.loopStartTime < this.loopEndTime,
+                this.loopEndTime <= this.duration,
             ];
             loopChecks.find((result, index) => {
                 if (!result) {
