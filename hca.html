@@ -40,55 +40,78 @@
     <button id="awstopbtn">Stop</button><br>
     <hr>
     <h3>Decode the whole file</h3>
-    Decoding mode: <input type="number" step="8" min="0" max="32" placeholder="0-99" id="decodingmodeinput" value="16"><br>
-    Loop count: <input type="number" step="1" min="0" max="99" placeholder="0-99" id="loopcountinput" value="0"><br>
-    Volume: <input type="number" step="1" min="0" max="100" placeholder="0-100" id="volumeinput" value="100"><br>
     Note:<br>
     (1) Setting decoding mode to <b>zero means 32-bit float mode</b>, or <b>8/16/24/32-bit integer mode</b> otherwise.<br>
     (2) Loop count is <b>ignored if HCA header doesn't have loop section</b><br>
     (3) Loop count doesn't count the existing part which is originally supposed to be looped.<br>
     &nbsp;&nbsp;&nbsp;&nbsp;<b>In other words, actual loop count will be: the number set here plus one.</b><br>
     (4) When <b>decoding the whole file</b>, setting loop count to <b>zero</b> means: <b>disabling loop</b>.</b><br>
-    <button disabled id="infobtn">get HCA info</button><br>
-    <style>
-        table {
-            border-top: 1px solid #000;
-            border-left: 1px solid #000;
-            border-spacing: 0;
-        }
-        tbody td {
-            border-bottom: 1px solid #000;
-            border-right: 1px solid #000;
-            min-width: 8ch;
-        }
-        thead tr th, tfoot tr th {
-            background-color: #fff;
-            color: #000;
-            border-bottom: 1px solid #000;
-            border-right: 1px solid #000;
-        }
-    </style>
-    <table id="hcaInfoTable">
-        <thead>
-            <tr>
-                <th colspan="3">HCA info</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td>(Not loaded)</td>
-            </tr>
-        </tbody>
-    </table>
-    <button disabled id="fixcsumbtn">fix checksum</button><br>
-    <button disabled id="encryptbtn">encrypt</button><br>
-    <button disabled id="decryptbtn">decrypt</button><br>
-    <button disabled id="decodebtn">decode</button><br>
-    <audio id="audioElement" controls></audio>
+    <fieldset>
+        <legend>HCA info</legend>
+        <button disabled id="infobtn">get HCA info</button><br>
+        <style>
+            table {
+                border-top: 1px solid #000;
+                border-left: 1px solid #000;
+                border-spacing: 0;
+            }
+            tbody td {
+                border-bottom: 1px solid #000;
+                border-right: 1px solid #000;
+                min-width: 8ch;
+            }
+            thead tr th, tfoot tr th {
+                background-color: #fff;
+                color: #000;
+                border-bottom: 1px solid #000;
+                border-right: 1px solid #000;
+            }
+        </style>
+        <table id="hcaInfoTable">
+            <thead>
+                <tr>
+                    <th colspan="3">HCA info</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>(Not loaded)</td>
+                </tr>
+            </tbody>
+        </table>
+    </fieldset>
+    <fieldset>
+        <legend>Checksum</legend>
+        <button disabled id="fixcsumbtn">fix checksum</button><br>
+    </fieldset>
+    <fieldset>
+        <legend>Cipher</legend>
+        <button disabled id="encryptbtn">encrypt</button><br>
+        <button disabled id="decryptbtn">decrypt</button><br>
+    </fieldset>
+    <fieldset>
+        <legend>Decoding parameters</legend>
+        Decoding mode: <input type="number" step="8" min="0" max="32" placeholder="0-99" id="decodingmodeinput" value="16"><br>
+        Loop count: <input type="number" step="1" min="0" max="99" placeholder="0-99" id="loopcountinput" value="0"><br>
+        Volume: <input type="range" step="1" min="0" max="100" placeholder="0-100" id="volumeslider" value="100">
+        <input type="number" step="1" min="0" max="100" placeholder="0-100" id="volumeinput" value="100"><br>
+    </fieldset>
+    <fieldset>
+        <legend>Decode to HTML5 Audio</legend>
+        <button disabled id="decodetoh5btn">decode</button><br>
+        <audio id="audioElement" controls></audio><br>
+    </fieldset>
+    <fieldset>
+        <legend>Decode to WebAudio AudioBufferSourceNode</legend>
+        <button disabled id="decodetowabtn">decode</button><br>
+        <button disabled id="webaudioplaybtn">Play</button><br>
+        <button disabled id="webaudiopausebtn">Pause</button><br>
+        <button disabled id="webaudiostopbtn">Stop</button><br>
+    </fieldset>
     <!-- <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.8.3/dist/ffmpeg.min.js"></script> -->
     <script type="module">
         const hcaJsUrl = new URL("hca.js", document.baseURI);
-        var hcaJsModule, hcaJsObjUrl, HCAInfo, HCAWorker;
+        var hcaJsModule, hcaJsObjUrl, HCAInfo, HCAWorker, HCAWebAudioLoopPlayer;
 
         // mime types
         const defMimeType = "application/octet-stream";
@@ -99,6 +122,9 @@
 
         // HCAWorker instance
         var worker = null;
+
+        // HCAWebAudioLoopPlayer instance
+        var webAudioLoopPlayer = null;
 
         // dragged file
         var draggedFile = null;
@@ -238,6 +264,26 @@
             },
         }
 
+        function setVolume(val) {
+            val = Number(val) / 100;
+            if (webAudioLoopPlayer != null) {
+                webAudioLoopPlayer.volume = val;
+            }
+        }
+        document.getElementById("volumeslider").addEventListener("input", (ev) => {
+            const val = ev.target.value;
+            document.getElementById("volumeinput").value = val;
+            setVolume(val);
+        });
+        document.getElementById("volumeinput").addEventListener("input", (ev) => {
+            const val = ev.target.value;
+            const slider = document.getElementById("volumeslider");
+            if (slider.value != val) {
+                slider.value = val;
+            }
+            setVolume(val);
+        });
+
         for (let paramName in decodingParam) {
             let el = decodingParam[paramName].el;
             let defVal = decodingParam[paramName].defVal;
@@ -293,7 +339,7 @@
             },
             // after decoding
             decoded: {
-                btnID: "decodebtn",
+                btnID: "decodetoh5btn",
                 data: {},
             },
         }
@@ -329,8 +375,8 @@
                     el.setAttribute("href", URL.createObjectURL(new Blob([val], {type: mimeType})));
                     el.innerHTML = newFileName;
                     let refNode = document.getElementById(hcaFileData[suffix].btnID).nextSibling;
-                    document.body.insertBefore(document.createElement("br"), refNode);
-                    document.body.insertBefore(el, refNode);
+                    refNode.parentElement.insertBefore(document.createElement("br"), refNode);
+                    refNode.parentElement.insertBefore(el, refNode);
                     // update value
                     this.value = val;
                 },
@@ -384,6 +430,7 @@
                     }
                     if (HCAInfo == null) HCAInfo = hcaJsModule.HCAInfo;
                     if (HCAWorker == null) HCAWorker = hcaJsModule.HCAWorker;
+                    if (HCAWebAudioLoopPlayer == null) HCAWebAudioLoopPlayer = hcaJsModule.HCAWebAudioLoopPlayer;
                     worker = await HCAWorker.create(hcaJsObjUrl);
                     console.log("started background worker");
                 }
@@ -589,7 +636,8 @@
                     let isEncrypted = info.hasHeader["ciph"] && info.cipher !=0;
                     buttons.encryptbtn = !isEncrypted;
                     buttons.decryptbtn = isEncrypted;
-                    buttons.decodebtn = !isEncrypted;
+                    buttons.decodetoh5btn = !isEncrypted;
+                    buttons.decodetowabtn = !isEncrypted;
                 } catch (e) {
                     console.error(e);
                     self.textContent = "get HCA info (failed)";
@@ -623,7 +671,7 @@
                 // let the button bounce
                 self.disabled = false;
             },
-            decodebtn: async (self) => {
+            decodetoh5btn: async (self) => {
                 // prepare data
                 let hca = hcaFileData[
                     ["decrypted", "fixed_checksum", "original"].find((suffix) => {
@@ -651,6 +699,76 @@
                 }
                 // let the button bounce
                 self.disabled = false;
+            },
+            decodetowabtn: async (self) => {
+                // prepare data
+                let hca = hcaFileData[
+                    ["decrypted", "fixed_checksum", "original"].find((suffix) => {
+                        if (hcaFileData[suffix].data != null) {
+                            console.log(`decoding ${suffix} data...`);
+                            return true;
+                        }
+                    })
+                ].data;
+                // start decoding
+                try {
+                    worker.tick();
+                    let decodedPromise = HCAWebAudioLoopPlayer.create(hca, worker, decodingParam.volumePerCent / 100);
+                    worker.tock("decoding");
+                    let newPlayer = await decodedPromise;
+                    // update player instance
+                    if (webAudioLoopPlayer != null) await webAudioLoopPlayer.stop();
+                    webAudioLoopPlayer = newPlayer;
+                    self.textContent = "decode (done)";
+                    // next step (play)
+                    buttons.webaudioplaybtn = true;
+                } catch (e) {
+                    console.error(e);
+                    self.textContent = "decode (failed)";
+                }
+                // let the button bounce
+                self.disabled = false;
+            },
+            webaudioplaybtn: async (self) => {
+                try {
+                    webAudioLoopPlayer.play();
+                    self.textContent = "Playing/Resumed";
+                } catch (e) {
+                    self.textContent = "Play/Resume (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.webaudiopausebtn = true;
+                buttons.webaudiostopbtn = true;
+            },
+            webaudiopausebtn: async (self) => {
+                try {
+                    webAudioLoopPlayer.pause();
+                    self.textContent = "Paused";
+                } catch (e) {
+                    self.textContent = "Pause (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.webaudioplaybtn = true;
+            },
+            webaudiostopbtn: async (self) => {
+                try {
+                    await webAudioLoopPlayer.stop();
+                    self.textContent = "Stopped";
+                } catch (e) {
+                    self.textContent = "Stop (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.webaudiopausebtn = false;
+                buttons.webaudioplaybtn = false;
             },
         };
         const _buttons = {};
@@ -720,9 +838,11 @@
             self.disabled = true;
             buttons[opposite + "btn"] = false;
             self.textContent = action + "ing...";
-            // disable decodebtn if necessary
-            if (!isEncrypting)
-                buttons.decodebtn = false
+            // disable decodetoh5btn and decodetowabtn if necessary
+            if (!isEncrypting) {
+                buttons.decodetoh5btn = false;
+                buttons.decodetowabtn = false;
+            }
             // prepare data
             let hca = hcaFileData[
                 [opposite + "ed", "fixed_checksum", "original"].find((suffix) => {
@@ -753,8 +873,10 @@
                 hcaFileData[action + "ed"].data = result;
                 // next steps
                 buttons[opposite + "btn"] = true;
-                if (!isEncrypting)
-                    buttons.decodebtn = true;
+                if (!isEncrypting) {
+                    buttons.decodetoh5btn = true;
+                    buttons.decodetowabtn = true;
+                }
             } catch (e) {
                 console.error(e);
                 self.textContent = "Error during " + (isEncrypting ? "encryption" : "decryption");

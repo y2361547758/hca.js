@@ -2299,6 +2299,110 @@ class HCACipher {
 }
 
 
+const suspendAudioCtxIfUnlocked = async (audioCtx: AudioContext): Promise<boolean> => {
+    // suspend audio context for now
+    // in apple webkit it's already suspended & calling suspend yet again will block
+    switch (audioCtx.state) {
+        case "running":
+            await audioCtx.suspend();
+            return true;
+        case "suspended":
+            console.warn(`audio context for sampleRate=${audioCtx.sampleRate} is suspended/locked,`
+                + ` which can only be resumed/unlocked by UI event.`);
+            return false;
+        default:
+            throw new Error(`audio context is neither running nor suspended`);
+    }
+}
+
+// WebAudio-based loop player
+export class HCAWebAudioLoopPlayer {
+    get unlocked(): boolean {
+        return this._unlocked;
+    }
+    private _unlocked: boolean;
+
+    private started = false;
+    private closed = false;
+
+    private readonly audioCtx: AudioContext;
+    private readonly info: HCAInfo;
+    private readonly bufSrc: AudioBufferSourceNode;
+    private readonly gainNode: GainNode;
+
+    get volume(): number {
+        return this.gainNode.gain.value;
+    }
+    set volume(val: number) {
+        if (isNaN(val)) return;
+        if (val > 1.0) val = 1.0;
+        if (val < 0) val = 0;
+        this.gainNode.gain.value = val;
+    }
+
+    private constructor(info: HCAInfo, bufSrc: AudioBufferSourceNode, audioCtx: AudioContext, unlocked: boolean,
+        gainNode: GainNode, volume: number) {
+        this.info = info;
+        this.bufSrc = bufSrc;
+        this.audioCtx = audioCtx;
+        this._unlocked = unlocked;
+        this.gainNode = gainNode;
+        this.volume = volume;
+    }
+    static async create(decrypted: Uint8Array, worker: HCAWorker, volume = 100): Promise<HCAWebAudioLoopPlayer> {
+        const info = new HCAInfo(decrypted);
+        if (info.cipher != 0) throw new Error("only decrypted hca is accepted");
+
+        const audioCtx = new AudioContext({
+            sampleRate: info.format.samplingRate,
+        });
+        const wav = await worker.decode(decrypted, 16); // first
+
+        const unlocked = await suspendAudioCtxIfUnlocked(audioCtx);
+
+        const buffer = await audioCtx.decodeAudioData(wav.buffer);
+
+        const bufSrc = audioCtx.createBufferSource();
+        bufSrc.buffer = buffer;
+        if (info.loop != null && info.loop.end > info.loop.start) {
+            bufSrc.loopStart = info.loopStartTime;
+            bufSrc.loopEnd = info.loopEndTime;
+            bufSrc.loop = true;
+        }
+
+        const gainNode = audioCtx.createGain();
+        bufSrc.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+
+        return new HCAWebAudioLoopPlayer(info, bufSrc, audioCtx, unlocked, gainNode, volume);
+    }
+
+    play(): void {
+        this.audioCtx.resume();
+        if (!this.started) {
+            this.bufSrc.start();
+            this.started = true;
+        }
+        // mark as unlocked
+        if (!this._unlocked) {
+            this._unlocked = true;
+            console.warn(`audio context for sampleRate=${this.audioCtx.sampleRate} is now resumed/unlocked`);
+        }
+    }
+    pause(): void {
+        if (this.audioCtx.state !== "running") return;
+        this.audioCtx.suspend();
+    }
+    async stop(): Promise<void> {
+        if (!this._unlocked) throw new Error("audio context is not unlocked, cannot stop and destroy");
+        if (this.closed) return;
+        this.bufSrc.disconnect();
+        await this.audioCtx.close();
+        this.closed = true;
+    }
+}
+
+
 // Web Worker / AudioWorklet support
 
 // AudioWorkletProcessor types declaration
@@ -3213,21 +3317,7 @@ class HCAAudioWorkletHCAPlayer {
         const hcaPlayerNode = new AudioWorkletNode(audioCtx, "hca-frame-player", options);
         // create gain node
         const gainNode = audioCtx.createGain();
-        // suspend audio context for now
-        // in apple webkit it's already suspended & calling suspend yet again will block
-        let unlocked = true;
-        switch (audioCtx.state) {
-            case "running":
-                await audioCtx.suspend();
-                break;
-            case "suspended":
-                unlocked = false;
-                console.warn(`audio context for sampleRate=${audioCtx.sampleRate} is suspended/locked,`
-                    + ` which can only be resumed/unlocked by UI event.`);
-                break;
-            default:
-                throw new Error(`audio context is neither running nor suspended`);
-        }
+        const unlocked = await suspendAudioCtxIfUnlocked(audioCtx);
         // create controller object
         return new HCAAudioWorkletHCAPlayer(selfUrl, audioCtx, unlocked, hcaPlayerNode, gainNode, feedBlockCount,
             info, actualSource, srcBuf, cipher);
