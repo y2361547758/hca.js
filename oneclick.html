@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head></head>
+<body>
+    <h1>HCA decoder demo</h1>
+    <a href="./">Full version</a>
+    <hr>
+    <button disabled id="webaudioplaybtn">Play</button><br>
+    <button disabled id="webaudiostopbtn">Stop</button><br>
+    <script type="module">
+        const hcaJsUrl = new URL("hca.js", document.baseURI);
+        var hcaJsModule, hcaJsObjUrl, HCAInfo, HCAWorker, HCAWebAudioLoopPlayer;
+
+        // HCAWorker instance
+        var worker = null;
+
+        // HCAWebAudioLoopPlayer instance
+        var webAudioLoopPlayer = null;
+
+        if (worker == null) {
+            if (hcaJsObjUrl == null) {
+                const response = await fetch(hcaJsUrl.href);
+                const blob = new Blob([await response.arrayBuffer()], {type: "text/javascript"});
+                hcaJsObjUrl = URL.createObjectURL(blob);
+            }
+            if (hcaJsModule == null) {
+                hcaJsModule = await import(hcaJsObjUrl);
+            }
+            if (HCAInfo == null) HCAInfo = hcaJsModule.HCAInfo;
+            if (HCAWorker == null) HCAWorker = hcaJsModule.HCAWorker;
+            if (HCAWebAudioLoopPlayer == null) HCAWebAudioLoopPlayer = hcaJsModule.HCAWebAudioLoopPlayer;
+            worker = await HCAWorker.create(hcaJsObjUrl);
+            console.log("started background worker");
+        }
+
+        try {
+            let response = await fetch("bgm22_battle01_hca.hca");
+            let hca = new Uint8Array(await response.arrayBuffer());
+            let decrypted = await worker.decrypt(hca, 0x01395C51, 0x00000000);
+
+            let newPlayer = await HCAWebAudioLoopPlayer.create(decrypted, worker);
+            if (webAudioLoopPlayer != null) await webAudioLoopPlayer.stop();
+            webAudioLoopPlayer = newPlayer;
+
+            webaudioplaybtn.disabled = false;
+        } catch (e) {
+            alert(e, e.stack);
+        }
+
+        webaudioplaybtn.addEventListener("click", (ev) => {
+            if (webAudioLoopPlayer != null) webAudioLoopPlayer.play();
+            webaudioplaybtn.disabled = true;
+            webaudiostopbtn.disabled = false;
+        });
+        webaudiostopbtn.addEventListener("click", async (ev) => {
+            if (webAudioLoopPlayer != null) await webAudioLoopPlayer.stop();
+            webaudiostopbtn.disabled = true;
+        });
+    </script>
+</body>
+</html>
