@@ -270,7 +270,7 @@ export class HCAInfo {
                 this.loopEndAtSample <= this.fullEndAtSample,
                 0 <= this.loopStartTime,
                 this.loopStartTime < this.loopEndTime,
-                this.loopEndTime <= this.duration,
+                this.loopEndTime <= this.duration + 1.0 / this.format.samplingRate,
             ];
             loopChecks.find((result, index) => {
                 if (!result) {
