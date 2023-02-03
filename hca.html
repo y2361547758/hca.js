@@ -41,11 +41,12 @@
     <hr>
     <h3>Decode the whole file</h3>
     Note:<br>
-    (1) Setting decoding mode to <b>zero means 32-bit float mode</b>, or <b>8/16/24/32-bit integer mode</b> otherwise.<br>
-    (2) Loop count is <b>ignored if HCA header doesn't have loop section</b><br>
-    (3) Loop count doesn't count the existing part which is originally supposed to be looped.<br>
+    (1) <b>Please click "get HCA info" button first.</b><br>
+    (2) Setting decoding mode to <b>zero means 32-bit float mode</b>, or <b>8/16/24/32-bit integer mode</b> otherwise.<br>
+    (3) Loop count is <b>ignored if HCA header doesn't have loop section</b><br>
+    (4) Loop count doesn't count the existing part which is originally supposed to be looped.<br>
     &nbsp;&nbsp;&nbsp;&nbsp;<b>In other words, actual loop count will be: the number set here plus one.</b><br>
-    (4) When <b>decoding the whole file</b>, setting loop count to <b>zero</b> means: <b>disabling loop</b>.</b><br>
+    (5) When <b>decoding the whole file</b>, setting loop count to <b>zero</b> means: <b>disabling loop</b>.</b><br>
     <fieldset>
         <legend>HCA info</legend>
         <button disabled id="infobtn">get HCA info</button><br>
@@ -103,6 +104,7 @@
     </fieldset>
     <fieldset>
         <legend>Decode to WebAudio AudioBufferSourceNode</legend>
+        <b>Playing will seamlessly loop if HCA supports looping.</b><br>
         <button disabled id="decodetowabtn">decode</button><br>
         <button disabled id="webaudioplaybtn">Play</button><br>
         <button disabled id="webaudiopausebtn">Pause</button><br>
