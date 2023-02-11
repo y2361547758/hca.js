@@ -1,6 +1,6 @@
 # HCA.js
 
-TypeScript port of [VGAudio](https://github.com/Thealexbarney/VGAudio)'s HCA codec
+TypeScript port of [VGAudio](https://github.com/Thealexbarney/VGAudio)'s and [vgmstream](https://github.com/vgmstream/vgmstream)'s HCA codec
 
 Thanks to [HCADecoder](https://github.com/Nyagamon/HCADecoder.git)
 
