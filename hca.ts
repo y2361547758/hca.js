@@ -2,6 +2,8 @@ export class HCAInfo {
     private rawHeader: Uint8Array;
 
     version = "";
+    versionMajor = 2;
+    versionMinor = 0;
     dataOffset = 0;
     format = {
         channelCount: 0,
@@ -98,6 +100,8 @@ export class HCAInfo {
             sub: p.getUint8(5)
         }
         this.version = version.main + '.' + version.sub;
+        this.versionMajor = version.main;
+        this.versionMinor = version.sub;
         this.dataOffset = p.getUint16(6);
         // verify checksum
         HCACrc16.verify(hca, this.dataOffset - 2);
