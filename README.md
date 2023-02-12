@@ -8,7 +8,7 @@ Decrypt & decode hca(2.0) file in browser.
 
 # Functions
 
-- [ ] HCA 3.0
+- [x] HCA 3.0
 - [x] HCA 2.0
 - [ ] HCA 1.3
 - [ ] unpack awb

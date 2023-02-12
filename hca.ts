@@ -1331,16 +1331,21 @@ class HCAPacking {
         this.WriteChecksum(writer, outBuffer);
     }
 
-    public static CalculateResolution(scaleFactor: number, noiseLevel: number): number {
+    public static CalculateResolution(scaleFactor: number, noiseLevel: number, versionMajor: number): number {
         if (scaleFactor == 0) {
             return 0;
         }
         let curvePosition = noiseLevel - (5 * scaleFactor >> 1) + 2;
-        curvePosition = HCAUtilFunc.Clamp(curvePosition, 0, 58);
+        //https://github.com/vgmstream/vgmstream/blob/4eecdada9a03a73af0c7c17f5cd6e08518fd7e3f/src/coding/hca_decoder_clhca.c#L1450
+        //FIXME hca2.0 decoding breaks if conditional (ternary) operator is removed
+        //curvePosition = HCAUtilFunc.Clamp(curvePosition, 0, 67);
+        curvePosition = HCAUtilFunc.Clamp(curvePosition, 0, versionMajor <= 2 ? 58 : 67);
         return HCATables.ScaleToResolutionCurve[curvePosition];
     }
 
     private static UnpackFrameHeader(frame: HCAFrame, reader: HCABitReader): boolean {
+        let hca = frame.Hca;
+
         let syncWord = reader.ReadInt(16);
         if (syncWord != 0xffff) {
             throw new Error("Invalid frame header");
@@ -1351,46 +1356,135 @@ class HCAPacking {
         frame.EvaluationBoundary = reader.ReadInt(7);
 
         for (let channel of frame.Channels) {
-            if (!this.ReadScaleFactors(channel, reader)) return false;
+            if (!this.ReadScaleFactors(channel, reader, hca.HfrGroupCount, hca.versionMajor)) return false;
 
+            // added clamp
+            //https://github.com/vgmstream/vgmstream/blob/4eecdada9a03a73af0c7c17f5cd6e08518fd7e3f/src/coding/hca_decoder_clhca.c#L1462
             for (let i = 0; i < frame.EvaluationBoundary; i++) {
-                channel.Resolution[i] = this.CalculateResolution(channel.ScaleFactors[i], athCurve[i] + frame.AcceptableNoiseLevel - 1);
+                let newResolution = this.CalculateResolution(
+                    channel.ScaleFactors[i],
+                    athCurve[i] + frame.AcceptableNoiseLevel - 1,
+                    hca.versionMajor
+                );
+                if (hca.versionMajor > 2) newResolution = HCAUtilFunc.Clamp(
+                    newResolution,
+                    hca.compDec.MinResolution,
+                    hca.compDec.MaxResolution
+                );
+                channel.Resolution[i] = newResolution;
             }
 
             for (let i = frame.EvaluationBoundary; i < channel.CodedScaleFactorCount; i++) {
-                channel.Resolution[i] = this.CalculateResolution(channel.ScaleFactors[i], athCurve[i] + frame.AcceptableNoiseLevel);
+                let newResolution = this.CalculateResolution(
+                    channel.ScaleFactors[i],
+                    athCurve[i] + frame.AcceptableNoiseLevel,
+                    hca.versionMajor
+                );
+                if (hca.versionMajor > 2) newResolution = HCAUtilFunc.Clamp(
+                    newResolution,
+                    hca.compDec.MinResolution,
+                    hca.compDec.MaxResolution
+                );
+                channel.Resolution[i] = newResolution;
             }
 
             if (channel.Type == HCAChannelType.StereoSecondary) {
-                this.ReadIntensity(reader, channel.Intensity);
+                this.ReadIntensity(reader, channel.Intensity, hca.versionMajor);
             }
             else if (frame.Hca.HfrGroupCount > 0) {
-                this.ReadHfrScaleFactors(reader, frame.Hca.HfrGroupCount, channel.HfrScales);
+                if (hca.versionMajor <= 2) this.ReadHfrScaleFactors(reader, frame.Hca.HfrGroupCount, channel.HfrScales);
+                // v3.0 uses values derived in ReadScaleFactors
             }
         }
         return true;
     }
 
-    private static ReadScaleFactors(channel: HCAChannel, reader: HCABitReader): boolean {
+    private static ReadScaleFactors(
+        channel: HCAChannel, reader: HCABitReader, hfrGroupCount: number, versionMajor: number
+    ): boolean {
         channel.ScaleFactorDeltaBits = reader.ReadInt(3);
         if (channel.ScaleFactorDeltaBits == 0) {
             channel.ScaleFactors.fill(0, 0, channel.ScaleFactors.length);
             return true;
         }
 
+        // added in v3.0
+        // https://github.com/vgmstream/vgmstream/blob/4eecdada9a03a73af0c7c17f5cd6e08518fd7e3f/src/coding/hca_decoder_clhca.c#L1287
+        let extraCodedScaleFactorCount: number;
+        let codedScaleFactorCount: number;
+        if (channel.Type == HCAChannelType.StereoSecondary || hfrGroupCount <= 0 || versionMajor <= 2) {
+            extraCodedScaleFactorCount = 0;
+            codedScaleFactorCount = channel.CodedScaleFactorCount;
+        } else {
+            extraCodedScaleFactorCount = hfrGroupCount;
+            codedScaleFactorCount = channel.CodedScaleFactorCount + extraCodedScaleFactorCount;
+
+            // just in case
+            if (codedScaleFactorCount > HCAFrame.SamplesPerSubFrame)
+                throw new Error(`codedScaleFactorCount > HCAFrame.SamplesPerSubFrame`);
+        }
+
         if (channel.ScaleFactorDeltaBits >= 6) {
-            for (let i = 0; i < channel.CodedScaleFactorCount; i++) {
+            for (let i = 0; i < codedScaleFactorCount; i++) {
                 channel.ScaleFactors[i] = reader.ReadInt(6);
             }
             return true;
         }
 
-        return this.DeltaDecode(reader, channel.ScaleFactorDeltaBits, 6, channel.CodedScaleFactorCount, channel.ScaleFactors);
+        let result = this.DeltaDecode(reader, channel.ScaleFactorDeltaBits, 6, codedScaleFactorCount, channel.ScaleFactors);
+        if (!result) return result;
+
+        // set derived HFR scales for v3.0
+        //FIXME UNTESTED
+        for (let i = 0; i < extraCodedScaleFactorCount; i++) {
+            channel.HfrScales[codedScaleFactorCount - 1 - i] = channel.ScaleFactors[codedScaleFactorCount - i];
+        }
+
+        return result;
     }
 
-    private static ReadIntensity(reader: HCABitReader, intensity: Int32Array): void {
-        for (let i = 0; i < HCAFrame.SubframesPerFrame; i++) {
-            intensity[i] = reader.ReadInt(4);
+    private static ReadIntensity(reader: HCABitReader, intensity: Int32Array, versionMajor: number): void {
+        if (versionMajor <= 2) {
+            for (let i = 0; i < HCAFrame.SubframesPerFrame; i++) {
+                intensity[i] = reader.ReadInt(4);
+            }
+        } else {
+            //https://github.com/vgmstream/vgmstream/blob/4eecdada9a03a73af0c7c17f5cd6e08518fd7e3f/src/coding/hca_decoder_clhca.c#L1374
+            let value = reader.ReadInt(4);
+            let delta_bits: number;
+
+            if (value < 15) {
+                delta_bits = reader.ReadInt(2); /* +1 */
+
+                intensity[0] = value;
+                if (delta_bits == 3) { /* 3+1 = 4b */
+                    /* fixed intensities */
+                    for (let i = 1; i < HCAFrame.SubframesPerFrame; i++) {
+                        intensity[i] = reader.ReadInt(4);
+                    }
+                } else {
+                    /* delta intensities */
+                    let bmax = (2 << delta_bits) - 1;
+                    let bits = delta_bits + 1;
+
+                    for (let i = 1; i < HCAFrame.SubframesPerFrame; i++) {
+                        let delta = reader.ReadInt(bits);
+                        if (delta == bmax) {
+                            value = reader.ReadInt(4); /* encoded */
+                        } else {
+                            value = value - (bmax >> 1) + delta; /* differential */
+                            if (value > 15) //todo check
+                                throw new Error(`value > 15`); /* not done in lib */
+                        }
+
+                        intensity[i] = value;
+                    }
+                }
+            } else {
+                for (let i = 0; i < HCAFrame.SubframesPerFrame; i++) {
+                    intensity[i] = 7;
+                }
+            }
         }
     }
 
@@ -1440,6 +1534,10 @@ class HCAPacking {
                 if (value < 0 || value > maxValue) {
                     return false;
                 }
+
+                // https://github.com/vgmstream/vgmstream/blob/4eecdada9a03a73af0c7c17f5cd6e08518fd7e3f/src/coding/hca_decoder_clhca.c#L1327
+                //value &= 0x3F; // v3.0 lib
+
                 output[i] = value;
             }
             else {
@@ -1853,7 +1951,8 @@ class HCATables {
         0x0F, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0C, 0x0C, 0x0C,
         0x0C, 0x0C, 0x0C, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A,
         0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x07, 0x06, 0x06, 0x05,
-        0x04, 0x04, 0x04, 0x03, 0x03, 0x03, 0x02, 0x02, 0x02, 0x02, 0x01
+        0x04, 0x04, 0x04, 0x03, 0x03, 0x03, 0x02, 0x02, 0x02, 0x02, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x00
     ]);
     static readonly AthCurve = new Uint8Array([
         0x78, 0x5F, 0x56, 0x51, 0x4E, 0x4C, 0x4B, 0x49, 0x48, 0x48, 0x47, 0x46, 0x46, 0x45, 0x45, 0x45,
