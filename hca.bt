@@ -91,7 +91,16 @@ local uint16 _blockSize;
 typedef struct {
 	uint16 blockSize;
 	_blockSize = blockSize;
-	uchar unknown[10];
+    uchar MinResolution;
+    uchar MaxResolution;
+    uchar TrackCount;
+    uchar ChannelConfig;
+    uchar TotalBandCount;
+    uchar BaseBandCount;
+    uchar StereoBandCount;
+    uchar BandsPerHfrGroup;
+    uchar Reserved1;
+    uchar Reserved2;
 } stCompress <read=compressRead>;
 string compressRead(stCompress& o) {
 	uchar dist[24];
