@@ -483,14 +483,18 @@ export class HCA {
     constructor() {
     }
 
-    static decrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array {
-        return this.decryptOrEncrypt(hca, false, key1, key2);
+    static decrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Uint8Array {
+        return this.decryptOrEncrypt(hca, false, key1, key2, subkey);
     }
-    static encrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array {
-        return this.decryptOrEncrypt(hca, true, key1, key2);
+    static encrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Uint8Array {
+        return this.decryptOrEncrypt(hca, true, key1, key2, subkey);
     }
-    static decryptOrEncrypt(hca: Uint8Array, encrypt: boolean, key1?: any, key2?: any): Uint8Array {
+    static decryptOrEncrypt(hca: Uint8Array, encrypt: boolean, key1?: any, key2?: any, subkey?: any): Uint8Array {
         // in-place decryption/encryption
+        // handle subkey
+        let mixed = HCACipher.mixWithSubkey(key1, key2, subkey);
+        key1 = mixed.key1;
+        key2 = mixed.key2;
         // parse header
         let info = new HCAInfo(hca); // throws "Not a HCA file" if mismatch
         if (!encrypt && !info.hasHeader["ciph"]) {
@@ -2132,8 +2136,8 @@ class HCACipher {
         this._table[0xFF] = 0xFF;
     }
     private init56(): void {
-        let key1 = this.getKey1();
-        let key2 = this.getKey2();
+        let key1 = this.dv1.getUint32(0, true);
+        let key2 = this.dv2.getUint32(0, true);
         if (!key1) key2--;
         key1--;
         this.dv1.setUint32(0, key1, true);
@@ -2201,29 +2205,63 @@ class HCACipher {
     getEncrypt(): boolean {
         return this.encrypt;
     }
-    getKey1(): number {
-        return this.dv1.getUint32(0, true);
-    }
-    getKey2(): number {
-        return this.dv2.getUint32(0, true);
-    }
     getBytesOfTwoKeys(): Uint8Array {
         let buf = new Uint8Array(8);
         buf.set(new Uint8Array(this.key1buf), 0);
         buf.set(new Uint8Array(this.key2buf), 4);
         return buf;
     }
-    setKey1(key: number): HCACipher {
-        this.dv1.setUint32(0, key, true);
-        this.init56();
-        this.cipherType = 0x38;
-        return this;
+    private static bigUintMultiplyLE(dv: DataView, factor: number): DataView {
+        const result = new DataView(new ArrayBuffer(dv.byteLength + 4));
+        factor = Math.trunc(factor);
+        Array.from({ length: dv.byteLength }, (_, i) => factor * dv.getUint8(i))
+            .forEach((v, i) => {
+                v += result.getUint32(i, true);
+                result.setUint32(i, v, true);
+                v -= result.getUint32(i, true);
+                if (v > 0) {
+                    v /= 0x100000000;
+                    for (let j = i + 4; j < result.byteLength; j++) {
+                        v += result.getUint8(j);
+                        result.setUint8(j, v);
+                        v -= result.getUint8(j);
+                        if (v > 0) v /= 0x100;
+                        else break;
+                    }
+                }
+            });
+        return result;
     }
-    setKey2(key: number): HCACipher {
-        this.dv2.setUint32(0, key, true);
-        this.init56();
-        this.cipherType = 0x38;
-        return this;
+    static mixWithSubkey(key1: any, key2: any, subkey: any): { key1: number, key2: number } {
+        // https://github.com/vgmstream/vgmstream/blob/84cfeaf993982b4245ce7593dcbb6816c5aee8bc/src/coding/hca_decoder.c#L313
+        /*
+            if (subkey) {
+                keycode = keycode * ( ((uint64_t)subkey << 16u) | ((uint16_t)~subkey + 2u) );
+            }
+        */
+
+        if (subkey == null) return { key1: key1, key2: key2 };
+
+        key1 = HCACipher.parseKey(key1);
+        key2 = HCACipher.parseKey(key2);
+        subkey = HCACipher.parseKey(subkey);
+
+        const keydv = new DataView(new ArrayBuffer(8));
+        keydv.setUint32(0, key1, true);
+        keydv.setUint32(4, key2, true);
+
+        const subkeydv = new DataView(new ArrayBuffer(4));
+        subkeydv.setUint16(2, subkey, true);
+        if (subkeydv.getUint16(2) == 0) return { key1: key1, key2: key2 }; //unchanged
+        subkeydv.setUint16(0, ~subkeydv.getUint16(2, true) + 2, true);
+        subkey = subkeydv.getUint32(0, true);
+
+        const mixedkeydv = this.bigUintMultiplyLE(keydv, subkey);
+
+        key1 = mixedkeydv.getUint32(0, true);
+        key2 = mixedkeydv.getUint32(4, true);
+
+        return { key1: key1, key2: key2 };
     }
     setKeys(key1: number, key2: number): HCACipher {
         this.dv1.setUint32(0, key1, true);
@@ -3276,7 +3314,7 @@ class HCAAudioWorkletHCAPlayer {
         }
     }
 
-    static async create(selfUrl: URL, source: Uint8Array | URL, key1?: any, key2?: any): Promise<HCAAudioWorkletHCAPlayer> {
+    static async create(selfUrl: URL, source: Uint8Array | URL, key1?: any, key2?: any, subkey?: any): Promise<HCAAudioWorkletHCAPlayer> {
         if (!(selfUrl instanceof URL)) throw new Error();
         if (!(source instanceof Uint8Array || source instanceof URL)) throw new Error();
 
@@ -3297,7 +3335,7 @@ class HCAAudioWorkletHCAPlayer {
         feedByteMax -= feedByteMax % info.blockSize;
         const feedBlockCount = feedByteMax / info.blockSize;
         // initialize cipher
-        const cipher = this.getCipher(info, key1, key2);
+        const cipher = this.getCipher(info, key1, key2, subkey);
         // create audio context
         const audioCtx = new AudioContext({
             //latencyHint: "playback", // FIXME "playback" seems to glitch if switched to background in Android
@@ -3372,7 +3410,11 @@ class HCAAudioWorkletHCAPlayer {
         this.hasLoop = info.hasHeader["loop"] ? true : false;
     }
 
-    private static getCipher(info: HCAInfo, key1?: any, key2?: any): HCACipher | undefined {
+    private static getCipher(info: HCAInfo, key1?: any, key2?: any, subkey?: any): HCACipher | undefined {
+        // handle subkey
+        let mixed = HCACipher.mixWithSubkey(key1, key2, subkey);
+        key1 = mixed.key1;
+        key2 = mixed.key2;
         switch (info.cipher) {
             case 0:
                 // not encrypted
@@ -3436,7 +3478,7 @@ class HCAAudioWorkletHCAPlayer {
         };
     }
 
-    async setSource(source: Uint8Array | URL, key1?: any, key2?: any): Promise<void> {
+    async setSource(source: Uint8Array | URL, key1?: any, key2?: any, subkey?: any): Promise<void> {
         let newInfo: HCAInfo;
         let newSource: Uint8Array | ReadableStreamDefaultReader<Uint8Array>;
         let newBuffer: Uint8Array | undefined = undefined;
@@ -3486,7 +3528,7 @@ class HCAAudioWorkletHCAPlayer {
                 }, result: async () => {
                     await this._suspend(); // initialized, but it's paused, until being requested to start/play (resume)
                     this.totalFedBlockCount = 0;
-                    this.cipher = HCAAudioWorkletHCAPlayer.getCipher(newInfo, key1, key2);
+                    this.cipher = HCAAudioWorkletHCAPlayer.getCipher(newInfo, key1, key2, subkey);
                     this.info = newInfo;
                     this.source = newSource;
                     this.srcBuf = newBuffer;
@@ -3676,11 +3718,11 @@ export class HCAWorker {
     async fixChecksum(hca: Uint8Array): Promise<Uint8Array> {
         return await this.taskQueue.execCmd("fixChecksum", [hca]);
     }
-    async decrypt(hca: Uint8Array, key1?: any, key2?: any): Promise<Uint8Array> {
-        return await this.taskQueue.execCmd("decrypt", [hca, key1, key2]);
+    async decrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Promise<Uint8Array> {
+        return await this.taskQueue.execCmd("decrypt", [hca, key1, key2, subkey]);
     }
-    async encrypt(hca: Uint8Array, key1?: any, key2?: any): Promise<Uint8Array> {
-        return await this.taskQueue.execCmd("encrypt", [hca, key1, key2]);
+    async encrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Promise<Uint8Array> {
+        return await this.taskQueue.execCmd("encrypt", [hca, key1, key2, subkey]);
     }
     async addHeader(hca: Uint8Array, sig: string, newData: Uint8Array): Promise<Uint8Array> {
         return await this.taskQueue.execCmd("addHeader", [hca, sig, newData]);
@@ -3691,16 +3733,16 @@ export class HCAWorker {
     async decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0): Promise<Uint8Array> {
         return await this.taskQueue.execCmd("decode", [hca, mode, loop, volume]);
     }
-    async loadHCAForPlaying(hca: URL | string | Uint8Array, key1?: any, key2?: any): Promise<void> {
+    async loadHCAForPlaying(hca: URL | string | Uint8Array, key1?: any, key2?: any, subkey?: any): Promise<void> {
         if (typeof hca === "string") {
             if (hca === "") throw new Error("empty URL");
             hca = new URL(hca, document.baseURI);
         } else if (!(hca instanceof URL) && !(hca instanceof Uint8Array))
             throw new Error("hca must be either URL or Uint8Array");
         if (this.awHcaPlayer == null) {
-            this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca, key1, key2);
+            this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca, key1, key2, subkey);
         } else {
-            await this.awHcaPlayer.setSource(hca, key1, key2);
+            await this.awHcaPlayer.setSource(hca, key1, key2, subkey);
         }
     }
     async pausePlaying(): Promise<void> {

@@ -22,6 +22,7 @@
     <h3>Set keys for decryption/encryption</h3>
     key1=<input type="text" spellcheck="false" id="key1input" value="0x01395C51"><br>
     key2=<input type="text" spellcheck="false" id="key2input" value="0x00000000"><br>
+    <i>(optional) </i>subkey=<input type="text" spellcheck="false" id="subkeyinput" value="0x0"><br>
     <i>Note: output waveform will be nothing but unpleasant meaningless noise if incorrect keys are given!</i><br>
     <hr>
     <h3>Streaming (<a href="https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet">AudioWorklet API</a>)</h3>
@@ -246,7 +247,7 @@
         });
 
         // keys
-        const keys = {key1: undefined, key2: undefined};
+        const keys = {key1: undefined, key2: undefined, subkey: undefined};
         for (let key in keys) {
             Object.defineProperty(keys, key, {
                 get: function () {return document.getElementById(key + "input").value},
@@ -554,7 +555,7 @@
             },
             awloadwholehcabtn: async (self) => {
                 try {
-                    await worker.loadHCAForPlaying(hcaFileData.original.data, keys.key1, keys.key2);
+                    await worker.loadHCAForPlaying(hcaFileData.original.data, keys.key1, keys.key2, keys.subkey);
                     self.textContent = "Load (successful)";
                 } catch (e) {
                     self.textContent = "Load (failed)";
@@ -570,7 +571,7 @@
             },
             awloadfromurlbtn: async (self) => {
                 try {
-                    await worker.loadHCAForPlaying(urlinput.value, keys.key1, keys.key2);
+                    await worker.loadHCAForPlaying(urlinput.value, keys.key1, keys.key2, keys.subkey);
                     self.textContent = "Load (successful)";
                 } catch (e) {
                     self.textContent = "Load (failed)";
@@ -871,7 +872,7 @@
                 // although decryption/encryption is done in-place,
                 // however since we are not using SharedArrayBuffer,
                 // the background worker is still actually overwritting a newly allocated buffer
-                let resultPromise = worker[action](hca, keys.key1, keys.key2);
+                let resultPromise = worker[action](hca, keys.key1, keys.key2, keys.subkey);
                 worker.tock(isEncrypting ? "encryption" : "decryption");
                 let result = await resultPromise;
                 self.textContent = action + " (done)";
