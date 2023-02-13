@@ -562,6 +562,75 @@ export class HCA {
         info.modify(hca, "ciph", newCipherData);
         return hca;
     }
+    static findKey(hca, givenKeyList, subkey, threshold = 0.5, depth = 1024) {
+        let keyList, unmixedKeyList;
+        if (givenKeyList == null) {
+            keyList = HCAKnownKeys;
+        }
+        else {
+            keyList = givenKeyList.map((keys) => [HCACipher.parseKey(keys[0]), HCACipher.parseKey(keys[1])]);
+            HCAKnownKeys.forEach((keys) => keyList === null || keyList === void 0 ? void 0 : keyList.push(keys));
+        }
+        unmixedKeyList = keyList.slice();
+        if (subkey != null) {
+            // handle subkey
+            keyList = keyList.map((keys) => {
+                let mixed = HCACipher.mixWithSubkey(keys[0], keys[1], subkey);
+                return [mixed.key1, mixed.key2];
+            });
+        }
+        // parse header
+        const info = new HCAInfo(hca); // throws "Not a HCA file" if mismatch
+        if (info.cipher == 0)
+            return; // not encrypted
+        const frame = new HCAFrame(info);
+        const scores = keyList.map(() => 0);
+        let cipher;
+        const testKey = (block, keys) => {
+            if (cipher == null)
+                cipher = new HCACipher(keys[0], keys[1]);
+            // decrypt block
+            block = block.slice();
+            cipher.mask(block, 0, info.blockSize - 2);
+            // test if the key is correct
+            let reader = new HCABitReader(block);
+            let result = false;
+            try {
+                result = HCAPacking.UnpackFrame(frame, reader);
+            }
+            catch (e) { }
+            if (!result) {
+                cipher = undefined;
+            }
+            return result;
+        };
+        let testedBlockCount = 0;
+        for (let i = 0, lastFound = -1; i < info.format.blockCount && i < depth; i++) {
+            let ftell = info.dataOffset + info.blockSize * i;
+            let block = hca.subarray(ftell, ftell + info.blockSize);
+            let found = -1;
+            if (lastFound != -1) {
+                // test last found key
+                if (testKey(block, keyList[lastFound]))
+                    found = lastFound;
+            }
+            if (found == -1) {
+                // last found key does not match, test others
+                found = keyList.findIndex((keys, index) => index == lastFound ? false : testKey(block, keys));
+            }
+            if (found != -1) {
+                lastFound = found;
+                scores[found]++;
+            }
+            testedBlockCount++;
+        }
+        let bestScore = 0, bestIndex = -1;
+        scores.forEach((s, i) => s > bestScore && (bestScore = s, bestIndex = i));
+        if (bestIndex == -1 || bestScore / testedBlockCount < threshold)
+            return; // cannot found valid key
+        else
+            return unmixedKeyList[bestIndex];
+    }
     static decode(hca, mode = 32, loop = 0, volume = 1.0) {
         switch (mode) {
             case 0: // float
@@ -2098,6 +2167,52 @@ HCACrc16._v = new Uint16Array([
     0x8243, 0x0246, 0x024C, 0x8249, 0x0258, 0x825D, 0x8257, 0x0252, 0x0270, 0x8275, 0x827F, 0x027A, 0x826B, 0x026E, 0x0264, 0x8261,
     0x0220, 0x8225, 0x822F, 0x022A, 0x823B, 0x023E, 0x0234, 0x8231, 0x8213, 0x0216, 0x021C, 0x8219, 0x0208, 0x820D, 0x8207, 0x0202
 ]);
+const HCAKnownKeys = [
+    // [lower 32 bits, higher 32 bits]
+    // eg. 6615518E8ECED447 => [0x8ECED447, 0x6615518E]
+    // source: https://github.com/Thealexbarney/VGAudio/blob/master/docs/audio-formats/hca/encryption-keys.md
+    [0x000004C8, 0x00000000],
+    [0x00000978, 0x00000000],
+    [0x000022CE, 0x00000000],
+    [0x00003039, 0x00000000],
+    [0x001D149A, 0x00000000],
+    [0x009134FC, 0x00000000],
+    [0x012C9A53, 0x00000000],
+    [0x012EBCCA, 0x00000000],
+    [0x012FCFDF, 0x00000000],
+    [0x01395C51, 0x00000000],
+    [0x0E62BEF0, 0x00000000],
+    [0x0E88473C, 0x00000000],
+    [0x49913556, 0x00000000],
+    [0x77EDA13A, 0x00000000],
+    [0x77EDF21C, 0x00000000],
+    [0x7235CB29, 0x0000000B],
+    [0x222AAA84, 0x00000497],
+    [0xA6AD6125, 0x00001B85],
+    [0xF27E3B22, 0x00003657],
+    [0x97978A96, 0x0000968A],
+    [0x95356C72, 0x0002354E],
+    [0xBC731A85, 0x0002B875],
+    [0x0DC57F48, 0x0011DCDD],
+    [0x1024ADE9, 0x00189DFB],
+    [0x634B5F07, 0x002055C8],
+    [0xA11CCFB0, 0x00688884],
+    [0x8D0C10FD, 0x00A06A0B],
+    [0xCC554639, 0x00DBE1AB],
+    [0x5990FB5E, 0x02051AF2],
+    [0xF5816A2A, 0x29AFE911],
+    [0x83653699, 0x438BF1F8],
+    [0xB8E6C6D2, 0x43E4EA62],
+    [0xC3091366, 0x7CEC81F7],
+    [0x92EBF464, 0x7E896318],
+    [0x30DBE1AB, 0xCC554639],
+    [0xE0748978, 0xCF222F1F],
+    [0x343D0000, 0xDB5B61B8],
+    [0xAB414BA1, 0xFDAE531A],
+    [0xFFFFFFFF, 0xFFFFFFFF],
+    // source: https://github.com/vgmstream/vgmstream/blob/36f4dfeab41adf8f8ff08477dc062f8c76b003d8/src/meta/hca_keys.h#L1059
+    [0x8ECED447, 0x6615518E], // Heaven Burns Red (Android)
+];
 class HCACipher {
     init1() {
         for (let i = 1, v = 0; i < 0xFF; i++) {
@@ -2407,14 +2522,31 @@ export class HCAWebAudioLoopPlayer {
         this.gainNode.gain.value = val;
     }
     constructor(info, bufSrc, audioCtx, unlocked, gainNode, volume) {
-        this.started = false;
+        this.bufSrcStarted = false;
         this.closed = false;
+        this.playInBackground = false; // FIXME
+        this.requestedToPlay = false;
+        this.visibilityChangeListener = () => {
+            switch (document.visibilityState) {
+                case 'visible':
+                    if (this.requestedToPlay) {
+                        this._play();
+                    }
+                    break;
+                case 'hidden':
+                default:
+                    if (!this.playInBackground) {
+                        this._pause();
+                    }
+            }
+        };
         this.info = info;
         this.bufSrc = bufSrc;
         this.audioCtx = audioCtx;
         this._unlocked = unlocked;
         this.gainNode = gainNode;
         this.volume = volume;
+        document.addEventListener('visibilitychange', this.visibilityChangeListener);
     }
     static create(decrypted, worker, volume = 100) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -2440,11 +2572,13 @@ export class HCAWebAudioLoopPlayer {
             return new HCAWebAudioLoopPlayer(info, bufSrc, audioCtx, unlocked, gainNode, volume);
         });
     }
-    play() {
-        this.audioCtx.resume();
-        if (!this.started) {
+    // not supposed to be used directly
+    _play() {
+        if (this.audioCtx.state !== "running")
+            this.audioCtx.resume();
+        if (!this.bufSrcStarted) {
             this.bufSrc.start();
-            this.started = true;
+            this.bufSrcStarted = true;
         }
         // mark as unlocked
         if (!this._unlocked) {
@@ -2452,10 +2586,18 @@ export class HCAWebAudioLoopPlayer {
             console.warn(`audio context for sampleRate=${this.audioCtx.sampleRate} is now resumed/unlocked`);
         }
     }
-    pause() {
+    _pause() {
         if (this.audioCtx.state !== "running")
             return;
         this.audioCtx.suspend();
+    }
+    play() {
+        this.requestedToPlay = true;
+        this._play();
+    }
+    pause() {
+        this.requestedToPlay = false;
+        this._pause();
     }
     stop() {
         return __awaiter(this, void 0, void 0, function* () {
@@ -2463,6 +2605,13 @@ export class HCAWebAudioLoopPlayer {
                 throw new Error("audio context is not unlocked, cannot stop and destroy");
             if (this.closed)
                 return;
+            try {
+                document.removeEventListener('visibilitychange', this.visibilityChangeListener);
+            }
+            catch (e) {
+                console.error(e);
+            }
+            this.requestedToPlay = false;
             this.bufSrc.disconnect();
             yield this.audioCtx.close();
             this.closed = true;
@@ -3184,6 +3333,8 @@ if (typeof document === "undefined") {
                     return HCAInfo.fixHeaderChecksum.apply(HCAInfo, task.args);
                 case "fixChecksum":
                     return HCA.fixChecksum.apply(HCA, task.args);
+                case "findKey":
+                    return HCA.findKey.apply(HCA, task.args);
                 case "decrypt":
                     return HCA.decrypt.apply(HCA, task.args);
                 case "encrypt":
@@ -3231,6 +3382,18 @@ class HCAAudioWorkletHCAPlayer {
     get downloadBufferSize() {
         const bytesPerSec = this.info.kbps * 1000 / 8;
         return bytesPerSec * 4;
+    }
+    get volume() {
+        return this.gainNode.gain.value;
+    }
+    set volume(val) {
+        if (isNaN(val))
+            return;
+        if (val > 1.0)
+            val = 1.0;
+        if (val < 0)
+            val = 0;
+        this.gainNode.gain.value = val;
     }
     taskHandler(task) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -3388,8 +3551,24 @@ class HCAAudioWorkletHCAPlayer {
     constructor(selfUrl, audioCtx, unlocked, hcaPlayerNode, gainNode, feedBlockCount, info, source, srcBuf, cipher) {
         this._initialized = true; // initially there must be something to play
         this.isPlaying = false;
+        this.playInBackground = false; // FIXME
+        this.requestedToPlay = false;
         this.verifyCsum = false;
         this.totalFedBlockCount = 0;
+        this.visibilityChangeListener = () => {
+            switch (document.visibilityState) {
+                case 'visible':
+                    if (this.requestedToPlay) {
+                        this._play();
+                    }
+                    break;
+                case 'hidden':
+                default:
+                    if (!this.playInBackground) {
+                        this._pause();
+                    }
+            }
+        };
         this.stopCmdItem = {
             // exec "reset" cmd first, in order to avoid "residue" burst noise to be played in the future (observed in Chrome)
             cmd: "reset", args: [], hook: {
@@ -3427,6 +3606,7 @@ class HCAAudioWorkletHCAPlayer {
         this.sampleRate = info.format.samplingRate;
         this.channelCount = info.format.channelCount;
         this.hasLoop = info.hasHeader["loop"] ? true : false;
+        document.addEventListener('visibilitychange', this.visibilityChangeListener);
     }
     static getCipher(info, key1, key2, subkey) {
         // handle subkey
@@ -3589,6 +3769,20 @@ class HCAAudioWorkletHCAPlayer {
             this.isPlaying = false;
         });
     }
+    _pause() {
+        return __awaiter(this, void 0, void 0, function* () {
+            yield this.setPlaying(false);
+        });
+    }
+    _play() {
+        return __awaiter(this, void 0, void 0, function* () {
+            // in apple webkit, audio context is suspended/locked initially,
+            // (other browsers like Firefox may have similar but less strict restrictions)
+            // to resume/unlock it, first resume() call must be triggered by from UI event,
+            // which must not be after await
+            yield this.setPlaying(true);
+        });
+    }
     // wraped to ensure atomicity
     setPlaying(toPlay) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -3624,21 +3818,20 @@ class HCAAudioWorkletHCAPlayer {
     }
     pause() {
         return __awaiter(this, void 0, void 0, function* () {
-            yield this.setPlaying(false);
+            this.requestedToPlay = false;
+            yield this._pause();
         });
     }
     play() {
         return __awaiter(this, void 0, void 0, function* () {
-            // in apple webkit, audio context is suspended/locked initially,
-            // (other browsers like Firefox may have similar but less strict restrictions)
-            // to resume/unlock it, first resume() call must be triggered by from UI event,
-            // which must not be after await
-            yield this.setPlaying(true);
+            this.requestedToPlay = true;
+            yield this._play();
         });
     }
     stop() {
         return __awaiter(this, void 0, void 0, function* () {
             // can unlock the locked audio context as well because it's resumed firstly before finally suspended
+            this.requestedToPlay = false;
             const item = this.stopCmdItem;
             yield this.taskQueue.execCmd(item.cmd, item.args, item.hook);
         });
@@ -3648,6 +3841,12 @@ class HCAAudioWorkletHCAPlayer {
             if (!this.isAlive) {
                 console.error(`already shutdown`);
                 return;
+            }
+            try {
+                document.removeEventListener('visibilitychange', this.visibilityChangeListener);
+            }
+            catch (e) {
+                console.error(e);
             }
             yield this.taskQueue.shutdown(forcibly);
         });
@@ -3757,6 +3956,11 @@ export class HCAWorker {
             return yield this.taskQueue.execCmd("fixChecksum", [hca]);
         });
     }
+    findKey(hca, givenKeyList, subkey, threshold = 0.5, depth = 1024) {
+        return __awaiter(this, void 0, void 0, function* () {
+            return yield this.taskQueue.execCmd("findKey", [hca, givenKeyList, subkey, threshold, depth]);
+        });
+    }
     decrypt(hca, key1, key2, subkey) {
         return __awaiter(this, void 0, void 0, function* () {
             return yield this.taskQueue.execCmd("decrypt", [hca, key1, key2, subkey]);
@@ -3795,7 +3999,14 @@ export class HCAWorker {
                 this.awHcaPlayer = yield HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca, key1, key2, subkey);
             }
             else {
-                yield this.awHcaPlayer.setSource(hca, key1, key2, subkey);
+                try {
+                    yield this.awHcaPlayer.setSource(hca, key1, key2, subkey);
+                }
+                catch (e) {
+                    console.error(`awHcaPlayer.setSource failed, attempt recreate player instance`, e);
+                    // FIXME memleak
+                    this.awHcaPlayer = yield HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca, key1, key2, subkey);
+                }
             }
         });
     }
