@@ -8,7 +8,7 @@
     <button disabled id="startworkerbtn">start background worker</button><br>
     <button disabled id="shutdownbtn">shutdown background worker</button><br>
     <hr>
-    <h3>Choose a HCA file</h3>
+    <h3>Choose a HCA or AWB file</h3>
     Drag & drop a file here,<br>
     <form id="localfileform">
         Or pick a local file: <input type="file" id="localfile" accept=".hca,application/octet-stream"><br>
@@ -18,6 +18,7 @@
     <b><u>Don't forget to</u></b> <button disabled id="loadfilebtn">load picked file</button><br>
     Or download from URL: <input type="text" spellcheck="false" id="urlinput" value="bgm22_battle01_hca.hca"><br>
     <button id="downloadbtn">download</button><br>
+    <div id="awbsubsongswitcher"></div>
     <hr>
     <h3>Set keys for decryption/encryption</h3>
     key1=<input type="text" spellcheck="false" id="key1input" value="0x01395C51"><br>
@@ -112,9 +113,12 @@
         <button disabled id="webaudiostopbtn">Stop</button><br>
     </fieldset>
     <!-- <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.8.3/dist/ffmpeg.min.js"></script> -->
+    <script>
+        var AWBSubsongSelect = null;
+    </script>
     <script type="module">
         const hcaJsUrl = new URL("hca.js", document.baseURI);
-        var hcaJsModule, hcaJsObjUrl, HCAInfo, HCAWorker, HCAWebAudioLoopPlayer;
+        var hcaJsModule, hcaJsObjUrl, AWBArchive, HCAInfo, HCAWorker, HCAWebAudioLoopPlayer;
 
         // mime types
         const defMimeType = "application/octet-stream";
@@ -132,6 +136,9 @@
         // dragged file
         var draggedFile = null;
 
+        // parsed AWB
+        var parsedAWB = null;
+
         // local file picker
         const localfile = document.getElementById("localfile");
         const localfileform = document.getElementById("localfileform");
@@ -144,11 +151,43 @@
         document.getElementById("hcaonly").addEventListener("change", function(ev) {
             localfile.accept = ev.target.checked ? ".hca,application/octet-stream" : "";
         });
+        // AWB subsong switcher
+        const awbsubsongswitcher = document.getElementById("awbsubsongswitcher");
+        AWBSubsongSelect = function (selected) {
+            let waveID = selected.id.replace(/^awb_subsong_id_/, "");
+            fileName = `${AWBFileName}_0.hca`;
+            hcaFileData.original.data = parsedAWB.hcaFiles[0].file;
+        }
+        function setAWBSubSongSwitcher(enable) {
+            if (!enable) {
+                awbsubsongswitcher.innerHTML = "";
+                keys.subkey = "0x0";
+                return;
+            }
+
+            const waveIDs = parsedAWB.hcaFiles.map((e) => e.waveID);
+            const subkey = `0x${parsedAWB.subkey.toString(16)}`;
+
+            console.log(`AWB archive version=[${parsedAWB.version}]`
+                + `, subsong count=[${parsedAWB.hcaFiles.length}], subkey=[${subkey}]`);
+
+            keys.subkey = subkey;
+            awbsubsongswitcher.innerHTML = `<fieldset><legend>AWB archive subsongs</legend>\n`
+            + `${waveIDs.map(
+                (id) =>
+                    `<div><input type=\"radio\" name=\"awb_subsong_id\" id=\"awb_subsong_id_${id}\"`
+                    + ` onclick=\"AWBSubsongSelect(this);\">`
+                    + `<label for=\"awb_subsong_id_${id}\">${id}</label>`
+                    + `</div>`
+            ).join("\n")}\n`
+            + `</fieldset>`;
+        }
 
         // input HCA URL
         const urlinput = document.getElementById("urlinput");
 
         // file name
+        var AWBFileName = null;
         var fileName = null;
 
         // HCA info table
@@ -394,6 +433,7 @@
             for (let suffix in hcaFileData) {
                 hcaFileData[suffix].data = null;
             }
+            setAWBSubSongSwitcher(null);
             hcaInfoTable.body.data = null;
             audioElement.src = null;
             console.log(`cleared all data`);
@@ -435,6 +475,7 @@
                     if (hcaJsModule == null) {
                         hcaJsModule = await import(hcaJsObjUrl);
                     }
+                    if (AWBArchive == null) AWBArchive = hcaJsModule.AWBArchive;
                     if (HCAInfo == null) HCAInfo = hcaJsModule.HCAInfo;
                     if (HCAWorker == null) HCAWorker = hcaJsModule.HCAWorker;
                     if (HCAWebAudioLoopPlayer == null) HCAWebAudioLoopPlayer = hcaJsModule.HCAWebAudioLoopPlayer;
@@ -479,7 +520,24 @@
                 } else {
                     ab = await file.arrayBuffer();
                 }
-                hcaFileData.original.data = new Uint8Array(ab);
+                // parse AWB
+                AWBFileName = null;
+                parsedAWB = null;
+                if (AWBArchive.isAWB(new Uint8Array(ab))) {
+                    try {
+                        parsedAWB = new AWBArchive(new Uint8Array(ab));
+                    } catch (e) {
+                        console.error(`error parsing AWB archive`, e);
+                    }
+                }
+                if (parsedAWB != null && parsedAWB.hcaFiles.length > 0) {
+                    AWBFileName = fileName;
+                    setAWBSubSongSwitcher(true);
+                    AWBSubsongSelect({id: "awb_subsong_id_0"});
+                } else {
+                    setAWBSubSongSwitcher(null);
+                    hcaFileData.original.data = new Uint8Array(ab);
+                }
                 self.textContent = "load picked file (successful)";
                 // no need to let the button bounce
                 // next step

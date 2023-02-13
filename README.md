@@ -11,7 +11,7 @@ Decrypt & decode hca(2.0) file in browser.
 - [x] HCA 3.0
 - [x] HCA 2.0
 - [ ] HCA 1.3
-- [ ] unpack awb
+- [x] unpack awb
 - [x] a/b Keys
 - [x] subkey
 - [x] decrypt
