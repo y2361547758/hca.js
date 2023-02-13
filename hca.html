@@ -161,9 +161,13 @@
         // AWB subsong switcher
         const awbsubsongswitcher = document.getElementById("awbsubsongswitcher");
         AWBSubsongSelect = function (selected) {
-            let waveID = selected.id.replace(/^awb_subsong_id_/, "");
-            fileName = `${AWBFileName}_0.hca`;
-            hcaFileData.original.data = parsedAWB.hcaFiles[0].file;
+            let index = selected.id.replace(/^awb_subsong_index_/, "");
+            fileName = `${AWBFileName}_${index}.hca`;
+            hcaFileData.original.data = parsedAWB.hcaFiles[index].file;
+            if (document.getElementById("awautoplayondrop").checked) {
+                buttons.awloadwholehcabtn = "click";
+                buttons.awresumebtn = "click";
+            }
         }
         function setAWBSubSongSwitcher(enable) {
             if (!enable) {
@@ -172,21 +176,29 @@
                 return;
             }
 
-            const waveIDs = parsedAWB.hcaFiles.map((e) => e.waveID);
             const subkey = `0x${parsedAWB.subkey.toString(16)}`;
 
             console.log(`AWB archive version=[${parsedAWB.version}]`
                 + `, subsong count=[${parsedAWB.hcaFiles.length}], subkey=[${subkey}]`);
 
+            const listEntries = parsedAWB.hcaFiles.map((entry, index) => {
+                // filter out non-HCA entries
+                if (entry.file.byteLength == 0) return;
+                try {
+                    new HCAInfo(entry.file);
+                } catch (e) {
+                    return;
+                }
+                // convert to HTML
+                return `<div><input type=\"radio\" name=\"awb_subsong_id\" id=\"awb_subsong_index_${index}\"`
+                    + ` onclick=\"AWBSubsongSelect(this);\">`
+                    + `<label for=\"awb_subsong_index_${index}\">waveID=${entry.waveID}</label>`
+                    + `</div>`;
+            }).filter((str) => str != null).join("\n");
+
             keys.subkey = subkey;
             awbsubsongswitcher.innerHTML = `<fieldset><legend>AWB archive subsongs</legend>\n`
-                + `${waveIDs.map(
-                    (id) =>
-                        `<div><input type=\"radio\" name=\"awb_subsong_id\" id=\"awb_subsong_id_${id}\"`
-                        + ` onclick=\"AWBSubsongSelect(this);\">`
-                        + `<label for=\"awb_subsong_id_${id}\">${id}</label>`
-                        + `</div>`
-                ).join("\n")}\n`
+                + `${listEntries}\n`
                 + `</fieldset>`;
         }
 
@@ -554,7 +566,7 @@
                 if (parsedAWB != null && parsedAWB.hcaFiles.length > 0) {
                     AWBFileName = fileName;
                     setAWBSubSongSwitcher(true);
-                    AWBSubsongSelect({ id: "awb_subsong_id_0" });
+                    AWBSubsongSelect({ id: "awb_subsong_index_0" });
                 } else {
                     setAWBSubSongSwitcher(null);
                     hcaFileData.original.data = new Uint8Array(ab);
