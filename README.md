@@ -286,6 +286,24 @@ async function decryptAndDecode(hca) {
 
  - Return the `transferArgs`, `replyArgs` config parameters described above.
 
+# Unpack AWB Archive
+
+### `AWBArchive.isAWB(file: Uint8Array): boolean`
+
+ - Return `true` if given `file` begins with "AFS2" magic value, which indicates it's an AWB archive. Return `false` otherwise.
+
+### `new AWBArchive(awb: Uint8Array)`
+
+ - Return an `AWBArchive` instance (referred as `AWBArchiveInstance` below) which contains various information parsed from AWB headers, and `HCA` files packed inside it.
+
+### `AWBArchiveInstance.subkey: number`
+
+ - `subkey` used to decrypt the packed HCA files. For explanation of `subkey`, please refer to [HCA.decrypt](#hcadecrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array)/[HCA.encrypt](#hcaencrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array) above.
+
+### `AWBArchiveInstance.subkey: hcaFiles: { waveID: number, file: Uint8Array }[]`
+
+ - The given AWB archive file is splitted, so that the packed HCA files can be extracted.
+
 # The following APIs have been removed:
 -  ~`new HCA(key1, key2)`~
 ~Init HCA decoder with key~
