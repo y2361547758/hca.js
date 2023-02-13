@@ -163,11 +163,12 @@
         });
         // AWB subsong switcher
         const awbsubsongswitcher = document.getElementById("awbsubsongswitcher");
-        AWBSubsongSelect = function (selected) {
+        AWBSubsongSelect = function (selected, doNotPlay) {
             let index = selected.id.replace(/^awb_subsong_index_/, "");
             fileName = `${AWBFileName}_${index}.hca`;
             hcaFileData.original.data = parsedAWB.hcaFiles[index].file;
-            if (document.getElementById("awautoplayondrop").checked) {
+            if (!doNotPlay && document.getElementById("awautoplayondrop").checked) {
+                // doNotPlay=true, will play in "drop" event
                 buttons.awloadwholehcabtn = "click";
                 buttons.awresumebtn = "click";
             }
@@ -572,7 +573,7 @@
                 if (parsedAWB != null && parsedAWB.hcaFiles.length > 0) {
                     AWBFileName = fileName;
                     setAWBSubSongSwitcher(true);
-                    AWBSubsongSelect({ id: "awb_subsong_index_0" });
+                    AWBSubsongSelect({ id: "awb_subsong_index_0" }, true); // doNotPlay=true, will play in "drop" event
                 } else {
                     setAWBSubSongSwitcher(null);
                     hcaFileData.original.data = new Uint8Array(ab);
