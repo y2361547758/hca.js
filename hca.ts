@@ -4034,7 +4034,13 @@ export class HCAWorker {
         if (this.awHcaPlayer == null) {
             this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca, key1, key2, subkey);
         } else {
-            await this.awHcaPlayer.setSource(hca, key1, key2, subkey);
+            try {
+                await this.awHcaPlayer.setSource(hca, key1, key2, subkey);
+            } catch (e) {
+                console.error(`awHcaPlayer.setSource failed, attempt recreate player instance`, e);
+                // FIXME memleak
+                this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca, key1, key2, subkey);
+            }
         }
     }
     async pausePlaying(): Promise<void> {
