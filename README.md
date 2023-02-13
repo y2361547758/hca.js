@@ -15,6 +15,7 @@ Decrypt & decode hca(2.0) file in browser.
 - [x] a/b Keys
 - [x] subkey
 - [x] decrypt
+- [x] test and find decryption key
 - [x] decode
 - [x] wave mode (8/16/24/32/float)
 - [x] loop
@@ -74,6 +75,29 @@ Decrypt/encrypt & return the whole HCA file **in-place** with specified keys - i
  - **Unencrypted HCA which lacks `ciph` header section cannot be directly encrypted.** See [HCAInfo.addCipherHeader](#hcainfoaddcipherheaderhca-uint8array-ciphertype-number--undefined--undefined-uint8array) below.
 
  - **Checksums will be verified in the process, and `Error` will be thrown on any mismatch.**
+
+### `HCA.findKey(hca: Uint8Array, givenKeyList?: [any, any][], subkey?: any, threshold = 0.5, depth = 1024): [number, number] | undefined`
+
+Test and find valid decryption key.
+
+ - `givenKeyList` is optional. If given, it should be an array of `[key1, key2]`.
+ 
+ An example `givenKeyList`:
+ 
+ ```JavaScript
+ [
+   [0x01395C51, 0x00000000], // Magia Record
+   [0x8ECED447, 0x6615518E], // Heaven Burns Red (Android)
+ ]
+ ```
+ 
+ - A built-in known key list will always be included regardless whether `givenKeyList` is given or not.
+
+ - For explanation of `key1`, `key2`, `subkey`, please refer to [HCA.decrypt](#hcadecrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array)/[HCA.encrypt](#hcaencrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array) above.
+ 
+ - This method will search for `depth` HCA blocks, 1024 by default.
+ 
+ - If `threshold` percentage (50% by default) of blocks can be decrypted and unpacked, the found key will be returned as `[key1, key2]`. Otherwise, `undefined` will be returned.
 
 ### `HCA.decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0): Uint8Array`
 
@@ -207,9 +231,10 @@ async function decryptAndDecode(hca) {
 
 ### `async hcaWorkerInstance.decrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Promise<Uint8Array>`
 ### `async hcaWorkerInstance.encrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Promise<Uint8Array>`
+### `async hcaWorkerInstance.findKey(hca: Uint8Array, givenKeyList?: [any, any][], subkey?: any, threshold = 0.5, depth = 1024): Promise<[number, number] | undefined>`
 ### `async hcaWorkerInstance.decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0): Promise<Uint8Array>`
 
- - Similar to the [HCA.decrypt](#hcadecrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array)/[HCA.encrypt](#hcaencrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array)/[HCA.decode](#hcadecodehca-uint8array-mode--32-loop--0-volume--10-uint8array) raw APIs described above.
+ - Similar to the [HCA.decrypt](#hcadecrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array)/[HCA.encrypt](#hcaencrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array)/[HCA.decode](#hcadecodehca-uint8array-mode--32-loop--0-volume--10-uint8array)/[HCA.findKey](#hcafindkeyhca-uint8array-givenkeylist-any-any-subkey-any-threshold--05-depth--1024-number-number--undefined) raw APIs described above.
 
 ### `async hcaWorkerInstance.tick(): Promise<void>`
 ### `async hcaWorkerInstance.tock(text = ""): Promise<number>`

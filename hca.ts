@@ -543,6 +543,78 @@ export class HCA {
         info.modify(hca, "ciph", newCipherData);
         return hca;
     }
+
+    static findKey(
+        hca: Uint8Array, givenKeyList?: [any, any][], subkey?: any, threshold = 0.5, depth = 1024
+    ): [number, number] | undefined {
+        let keyList: [number, number][], unmixedKeyList: [number, number][];
+        if (givenKeyList == null) {
+            keyList = HCAKnownKeys;
+        } else {
+            keyList = givenKeyList.map((keys) => [HCACipher.parseKey(keys[0]), HCACipher.parseKey(keys[1])]);
+            HCAKnownKeys.forEach((keys) => keyList?.push(keys));
+        }
+        unmixedKeyList = keyList.slice();
+
+        if (subkey != null) {
+            // handle subkey
+            keyList = keyList.map((keys) => {
+                let mixed = HCACipher.mixWithSubkey(keys[0], keys[1], subkey);
+                return [mixed.key1, mixed.key2];
+            });
+        }
+
+        // parse header
+        const info = new HCAInfo(hca); // throws "Not a HCA file" if mismatch
+        const frame = new HCAFrame(info);
+
+        const scores = keyList.map(() => 0);
+
+        let cipher: HCACipher | undefined;
+        const testKey = (block: Uint8Array, keys: [number, number]): boolean => {
+            if (cipher == null) cipher = new HCACipher(keys[0], keys[1]);
+            // decrypt block
+            block = block.slice();
+            cipher.mask(block, 0, info.blockSize - 2);
+            // test if the key is correct
+            let reader = new HCABitReader(block);
+            let result = false;
+            try {
+                result = HCAPacking.UnpackFrame(frame, reader);
+            } catch (e) { }
+            if (!result) {
+                cipher = undefined;
+            }
+            return result;
+        }
+        let testedBlockCount = 0;
+        for (let i = 0, lastFound = -1; i < info.format.blockCount && i < depth; i++) {
+            let ftell = info.dataOffset + info.blockSize * i;
+            let block = hca.subarray(ftell, ftell + info.blockSize);
+
+            let found = -1;
+            if (lastFound != -1) {
+                // test last found key
+                if (testKey(block, keyList[lastFound])) found = lastFound;
+            }
+            if (found == -1) {
+                // last found key does not match, test others
+                found = keyList.findIndex((keys, index) => index == lastFound ? false : testKey(block, keys));
+            }
+            if (found != -1) {
+                lastFound = found;
+                scores[found]++;
+            }
+
+            testedBlockCount++;
+        }
+        let bestScore = 0, bestIndex = -1;
+        scores.forEach((s, i) => s > bestScore && (bestScore = s, bestIndex = i));
+
+        if (bestIndex == -1 || bestScore / testedBlockCount < threshold) return; // cannot found valid key
+        else return unmixedKeyList[bestIndex];
+    }
+
     static decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0) {
         switch (mode) {
             case 0: // float
@@ -2219,6 +2291,55 @@ class HCACrc16 {
     }
 }
 
+const HCAKnownKeys: [number, number][] = [
+    // [lower 32 bits, higher 32 bits]
+    // eg. 6615518E8ECED447 => [0x8ECED447, 0x6615518E]
+
+    // source: https://github.com/Thealexbarney/VGAudio/blob/master/docs/audio-formats/hca/encryption-keys.md
+    [0x000004C8, 0x00000000], // One Piece Treasure Cruise (iOS/Android)
+    [0x00000978, 0x00000000], // Idol Connect (iOS/Android)
+    [0x000022CE, 0x00000000], // BanG Dream! Girls Band Party! (iOS/Android)
+    [0x00003039, 0x00000000], // Fate/Grand Order (iOS/Android) base assets
+    [0x001D149A, 0x00000000], // One Piece Dance Battle (iOS/Android)
+    [0x009134FC, 0x00000000], // Tales of the Rays (iOS/Android)
+    [0x012C9A53, 0x00000000], // Jojo All Star Battle (PS3)
+    [0x012EBCCA, 0x00000000], // Derby Stallion Masters (iOS/Android)
+    [0x012FCFDF, 0x00000000], // Sonic Runners (iOS/Android)
+    [0x01395C51, 0x00000000], // Puella Magi Madoka Magica Side Story: Magia Record (iOS/Android)<br/>Hortensia Saga 0000000002B99F1A // Raramagi (iOS/Android)
+    [0x0E62BEF0, 0x00000000], // Bad Apple Wars (Vita)
+    [0x0E88473C, 0x00000000], // Koi to Senkyo to Chocolate Portable (PSP)
+    [0x49913556, 0x00000000], // Ro-Kyu-Bu! Naisho no Shutter Chance (Vita)
+    [0x77EDA13A, 0x00000000], // Custom Drive (PSP)
+    [0x77EDF21C, 0x00000000], // Ro-Kyu-Bu! Himitsu no Otoshimono (PSP)
+    [0x7235CB29, 0x0000000B], // Skylock - Kamigami to Unmei no Itsutsuko (iOS)
+    [0x222AAA84, 0x00000497], // For Whom the Alchemist Exists (iOS/Android)
+    [0xA6AD6125, 0x00001B85], // SD Gundam Strikers (iOS/Android)
+    [0xF27E3B22, 0x00003657], // Idolm@ster Cinderella Stage (iOS/Android)
+    [0x97978A96, 0x0000968A], // Super Robot Wars X-Omega (iOS/Android)
+    [0x95356C72, 0x0002354E], // Azur Lane (iOS/Android)
+    [0xBC731A85, 0x0002B875], // Idolm@ster Million Live (iOS/Android)
+    [0x0DC57F48, 0x0011DCDD], // Grimoire - Shiritsu Grimoire Mahou Gakuen (iOS/Android)
+    [0x1024ADE9, 0x00189DFB], // Tokyo Ghoul: Re Invoke (iOS/Android)
+    [0x634B5F07, 0x002055C8], // The Tower of Princess (iOS/Android)
+    [0xA11CCFB0, 0x00688884], // Kamen Rider Battle Rush (iOS/Android)
+    [0x8D0C10FD, 0x00A06A0B], // Ikemen Vampire - Ijin-tachi to Koi no Yuuwaku (iOS/Android)
+    [0xCC554639, 0x00DBE1AB], // Old Phantasy Star Online 2
+    [0x5990FB5E, 0x02051AF2], // Fallen Princess (iOS/Android)
+    [0xF5816A2A, 0x29AFE911], // Kurokishi to Shiro no Maou (iOS/Android)
+    [0x83653699, 0x438BF1F8], // Yuyuyui (iOS/Android) *unconfirmed
+    [0xB8E6C6D2, 0x43E4EA62], // World Chain (iOS/Android)
+    [0xC3091366, 0x7CEC81F7], // Diss World (iOS/Android)
+    [0x92EBF464, 0x7E896318], // Fate/Grand Order (iOS/Android) download assets *unconfirmed
+    [0x30DBE1AB, 0xCC554639], // Phantasy Star Online 2
+    [0xE0748978, 0xCF222F1F], // Default key from CRI
+    [0x343D0000, 0xDB5B61B8], // Schoolgirl Strikers: Twinkle Melodies (iOS/Android)
+    [0xAB414BA1, 0xFDAE531A], // Tokyo 7th Sisters (iOS/Android) *unconfirmed
+    [0xFFFFFFFF, 0xFFFFFFFF], // Tekken Mobile (iOS/Android)
+
+    // source: https://github.com/vgmstream/vgmstream/blob/36f4dfeab41adf8f8ff08477dc062f8c76b003d8/src/meta/hca_keys.h#L1059
+    [0x8ECED447, 0x6615518E], // Heaven Burns Red (Android)
+];
+
 class HCACipher {
     static readonly defKey1 = 0x01395C51;
     static readonly defKey2 = 0x00000000;
@@ -3340,6 +3461,8 @@ if (typeof document === "undefined") {
                         return HCAInfo.fixHeaderChecksum.apply(HCAInfo, task.args);
                     case "fixChecksum":
                         return HCA.fixChecksum.apply(HCA, task.args);
+                    case "findKey":
+                        return HCA.findKey.apply(HCA, task.args);
                     case "decrypt":
                         return HCA.decrypt.apply(HCA, task.args);
                     case "encrypt":
@@ -3883,6 +4006,9 @@ export class HCAWorker {
     }
     async fixChecksum(hca: Uint8Array): Promise<Uint8Array> {
         return await this.taskQueue.execCmd("fixChecksum", [hca]);
+    }
+    async findKey(hca: Uint8Array, givenKeyList?: [any, any][], subkey?: any, threshold = 0.5, depth = 1024): Promise<[number, number] | undefined> {
+        return await this.taskQueue.execCmd("findKey", [hca, givenKeyList, subkey, threshold, depth]);
     }
     async decrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Promise<Uint8Array> {
         return await this.taskQueue.execCmd("decrypt", [hca, key1, key2, subkey]);

@@ -300,6 +300,20 @@
                 set: function (val) { document.getElementById(key + "input").value = val },
             });
         }
+        async function testAndFindValidKeyAsync() {
+            worker.tick();
+            let resultPromise = worker.findKey(hcaFileData.original.data, [[keys.key1, keys.key2]], keys.subkey);
+            worker.tock(`findKey`);
+            let result = await resultPromise;
+            if (result != null) {
+                result = result.map((k) => `0x${k.toString(16)}`);
+                console.log(`found valid key`, result);
+                keys.key1 = result[0];
+                keys.key2 = result[1];
+            } else {
+                console.warn(`no valid key found!`);
+            }
+        }
 
         // mode/loop/volume
         const decodingParam = {
@@ -545,6 +559,8 @@
                     setAWBSubSongSwitcher(null);
                     hcaFileData.original.data = new Uint8Array(ab);
                 }
+                // find valid key
+                await testAndFindValidKeyAsync();
                 self.textContent = "load picked file (successful)";
                 // no need to let the button bounce
                 // next step
@@ -611,6 +627,8 @@
                 let ab = await response.arrayBuffer();
                 hcaFileData.original.data = new Uint8Array(ab);
                 self.textContent = "download (successful)";
+                // find valid key
+                await testAndFindValidKeyAsync();
                 // let the button bounce
                 self.disabled = false;
                 // next step
