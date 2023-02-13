@@ -176,7 +176,7 @@
                 return;
             }
 
-            const subkey = `0x${parsedAWB.subkey.toString(16)}`;
+            const subkey = `0x${parsedAWB.subkey.toString(16).toUpperCase()}`;
 
             console.log(`AWB archive version=[${parsedAWB.version}]`
                 + `, subsong count=[${parsedAWB.hcaFiles.length}], subkey=[${subkey}]`);
@@ -318,7 +318,7 @@
             worker.tock(`findKey`);
             let result = await resultPromise;
             if (result != null) {
-                result = result.map((k) => `0x${k.toString(16)}`);
+                result = result.map((k) => `0x${k.toString(16).toUpperCase()}`);
                 console.log(`found valid key`, result);
                 keys.key1 = result[0];
                 keys.key2 = result[1];
