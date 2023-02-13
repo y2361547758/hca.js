@@ -566,6 +566,9 @@ export class HCA {
 
         // parse header
         const info = new HCAInfo(hca); // throws "Not a HCA file" if mismatch
+
+        if (info.cipher == 0) return; // not encrypted
+
         const frame = new HCAFrame(info);
 
         const scores = keyList.map(() => 0);
