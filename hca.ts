@@ -1206,7 +1206,7 @@ enum HCAChannelType {
 class HCADecoder {
     static DecodeFrame(audio: Uint8Array, frame: HCAFrame): void {
         let reader = new HCABitReader(audio);
-        HCAPacking.UnpackFrame(frame, reader);
+        if (!HCAPacking.UnpackFrame(frame, reader)) throw new Error(`UnpackFrame failed`);
         this.DequantizeFrame(frame);
         this.RestoreMissingBands(frame);
         this.RunImdct(frame);
