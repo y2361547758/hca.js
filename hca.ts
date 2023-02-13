@@ -2650,8 +2650,11 @@ export class HCAWebAudioLoopPlayer {
     }
     private _unlocked: boolean;
 
-    private started = false;
+    private bufSrcStarted = false;
     private closed = false;
+
+    playInBackground = false; // FIXME
+    private requestedToPlay = false;
 
     private readonly audioCtx: AudioContext;
     private readonly info: HCAInfo;
@@ -2668,6 +2671,21 @@ export class HCAWebAudioLoopPlayer {
         this.gainNode.gain.value = val;
     }
 
+    private readonly visibilityChangeListener = (): void => {
+        switch (document.visibilityState) {
+            case 'visible':
+                if (this.requestedToPlay) {
+                    this._play();
+                }
+                break;
+            case 'hidden':
+            default:
+                if (!this.playInBackground) {
+                    this._pause();
+                }
+        }
+    }
+
     private constructor(info: HCAInfo, bufSrc: AudioBufferSourceNode, audioCtx: AudioContext, unlocked: boolean,
         gainNode: GainNode, volume: number) {
         this.info = info;
@@ -2676,6 +2694,8 @@ export class HCAWebAudioLoopPlayer {
         this._unlocked = unlocked;
         this.gainNode = gainNode;
         this.volume = volume;
+
+        document.addEventListener('visibilitychange', this.visibilityChangeListener);
     }
     static async create(decrypted: Uint8Array, worker: HCAWorker, volume = 100): Promise<HCAWebAudioLoopPlayer> {
         const info = new HCAInfo(decrypted);
@@ -2705,11 +2725,12 @@ export class HCAWebAudioLoopPlayer {
         return new HCAWebAudioLoopPlayer(info, bufSrc, audioCtx, unlocked, gainNode, volume);
     }
 
-    play(): void {
-        this.audioCtx.resume();
-        if (!this.started) {
+    // not supposed to be used directly
+    private _play(): void {
+        if (this.audioCtx.state !== "running") this.audioCtx.resume();
+        if (!this.bufSrcStarted) {
             this.bufSrc.start();
-            this.started = true;
+            this.bufSrcStarted = true;
         }
         // mark as unlocked
         if (!this._unlocked) {
@@ -2717,13 +2738,30 @@ export class HCAWebAudioLoopPlayer {
             console.warn(`audio context for sampleRate=${this.audioCtx.sampleRate} is now resumed/unlocked`);
         }
     }
-    pause(): void {
+    private _pause(): void {
         if (this.audioCtx.state !== "running") return;
         this.audioCtx.suspend();
+    }
+
+    play(): void {
+        this.requestedToPlay = true;
+        this._play();
+    }
+    pause(): void {
+        this.requestedToPlay = false;
+        this._pause();
     }
     async stop(): Promise<void> {
         if (!this._unlocked) throw new Error("audio context is not unlocked, cannot stop and destroy");
         if (this.closed) return;
+
+        try {
+            document.removeEventListener('visibilitychange', this.visibilityChangeListener);
+        } catch (e) {
+            console.error(e);
+        }
+
+        this.requestedToPlay = false;
         this.bufSrc.disconnect();
         await this.audioCtx.close();
         this.closed = true;
@@ -3501,6 +3539,9 @@ class HCAAudioWorkletHCAPlayer {
     private _unlocked: boolean;
     private isPlaying = false;
 
+    playInBackground = false; // FIXME
+    private requestedToPlay = false;
+
     private source?: Uint8Array | ReadableStreamDefaultReader<Uint8Array>;
     private srcBuf?: Uint8Array;
     private info: HCAInfo;
@@ -3687,6 +3728,21 @@ class HCAAudioWorkletHCAPlayer {
         }
     }
 
+    private readonly visibilityChangeListener = (): void => {
+        switch (document.visibilityState) {
+            case 'visible':
+                if (this.requestedToPlay) {
+                    this._play();
+                }
+                break;
+            case 'hidden':
+            default:
+                if (!this.playInBackground) {
+                    this._pause();
+                }
+        }
+    }
+
     private constructor(selfUrl: URL, audioCtx: AudioContext, unlocked: boolean,
         hcaPlayerNode: AudioWorkletNode, gainNode: GainNode, feedBlockCount: number,
         info: HCAInfo, source: Uint8Array | ReadableStreamDefaultReader<Uint8Array>, srcBuf?: Uint8Array, cipher?: HCACipher) {
@@ -3710,6 +3766,8 @@ class HCAAudioWorkletHCAPlayer {
         this.sampleRate = info.format.samplingRate;
         this.channelCount = info.format.channelCount;
         this.hasLoop = info.hasHeader["loop"] ? true : false;
+
+        document.addEventListener('visibilitychange', this.visibilityChangeListener);
     }
 
     private static getCipher(info: HCAInfo, key1?: any, key2?: any, subkey?: any): HCACipher | undefined {
@@ -3864,6 +3922,16 @@ class HCAAudioWorkletHCAPlayer {
         await this.audioCtx.suspend();
         this.isPlaying = false;
     }
+    private async _pause(): Promise<void> {
+        await this.setPlaying(false);
+    }
+    private async _play(): Promise<void> {
+        // in apple webkit, audio context is suspended/locked initially,
+        // (other browsers like Firefox may have similar but less strict restrictions)
+        // to resume/unlock it, first resume() call must be triggered by from UI event,
+        // which must not be after await
+        await this.setPlaying(true);
+    }
     private readonly stopCmdItem = {
         // exec "reset" cmd first, in order to avoid "residue" burst noise to be played in the future (observed in Chrome)
         cmd: "reset", args: [], hook: {
@@ -3908,17 +3976,16 @@ class HCAAudioWorkletHCAPlayer {
         });
     }
     async pause(): Promise<void> {
-        await this.setPlaying(false);
+        this.requestedToPlay = false;
+        await this._pause();
     }
     async play(): Promise<void> {
-        // in apple webkit, audio context is suspended/locked initially,
-        // (other browsers like Firefox may have similar but less strict restrictions)
-        // to resume/unlock it, first resume() call must be triggered by from UI event,
-        // which must not be after await
-        await this.setPlaying(true);
+        this.requestedToPlay = true;
+        await this._play();
     }
     async stop(): Promise<void> {
         // can unlock the locked audio context as well because it's resumed firstly before finally suspended
+        this.requestedToPlay = false;
         const item = this.stopCmdItem;
         await this.taskQueue.execCmd(item.cmd, item.args, item.hook);
     }
@@ -3928,6 +3995,13 @@ class HCAAudioWorkletHCAPlayer {
             console.error(`already shutdown`);
             return;
         }
+
+        try {
+            document.removeEventListener('visibilitychange', this.visibilityChangeListener);
+        } catch (e) {
+            console.error(e);
+        }
+
         await this.taskQueue.shutdown(forcibly);
     }
 }

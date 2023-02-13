@@ -39,6 +39,8 @@
     Load directly from the URL above, without fully downloading the whole file:<br>
     <button id="awloadfromurlbtn">Load</button><br>
     Progress control:<br>
+    <input type="checkbox" id="awplayinbackground">
+    <label for="awplayinbackground">Play in background (may glitch)</label><br>
     <button id="awresumebtn">Play/Resume</button><br>
     <button id="awpausebtn">Pause</button><br>
     <button id="awstopbtn">Stop</button><br>
@@ -118,6 +120,8 @@
         <legend>Decode to WebAudio AudioBufferSourceNode</legend>
         <b>Playing will seamlessly loop if HCA supports looping.</b><br>
         <button disabled id="decodetowabtn">decode</button><br>
+        <input type="checkbox" id="webaudioplayinbackground">
+        <label for="webaudioplayinbackground">Play in background (may glitch)</label><br>
         <button disabled id="webaudioplaybtn">Play</button><br>
         <button disabled id="webaudiopausebtn">Pause</button><br>
         <button disabled id="webaudiostopbtn">Stop</button><br>
@@ -369,6 +373,18 @@
             }
             setVolume(val);
         });
+
+        // play in background checkbox
+        const awplayinbackground = document.getElementById("awplayinbackground");
+        awplayinbackground.addEventListener("change", (ev) => {
+            if (worker == null || worker.awHcaPlayer == null) return;
+            worker.awHcaPlayer.playInBackground = ev.target.checked;
+        }, false);
+        const webaudioplayinbackground = document.getElementById("webaudioplayinbackground");
+        webaudioplayinbackground.addEventListener("change", (ev) => {
+            if (webAudioLoopPlayer == null) return;
+            webAudioLoopPlayer.playInBackground = ev.target.checked;
+        }, false);
 
         for (let paramName in decodingParam) {
             let el = decodingParam[paramName].el;
@@ -658,6 +674,7 @@
             awloadwholehcabtn: async (self) => {
                 try {
                     await worker.loadHCAForPlaying(hcaFileData.original.data, keys.key1, keys.key2, keys.subkey);
+                    worker.awHcaPlayer.playInBackground = awplayinbackground.checked;
                     self.textContent = "Load (successful)";
                 } catch (e) {
                     self.textContent = "Load (failed)";
@@ -674,6 +691,7 @@
             awloadfromurlbtn: async (self) => {
                 try {
                     await worker.loadHCAForPlaying(urlinput.value, keys.key1, keys.key2, keys.subkey);
+                    worker.awHcaPlayer.playInBackground = awplayinbackground.checked;
                     self.textContent = "Load (successful)";
                 } catch (e) {
                     self.textContent = "Load (failed)";
@@ -828,6 +846,7 @@
                     // update player instance
                     if (webAudioLoopPlayer != null) await webAudioLoopPlayer.stop();
                     webAudioLoopPlayer = newPlayer;
+                    webAudioLoopPlayer.playInBackground = webaudioplayinbackground.checked;
                     self.textContent = "decode (done)";
                     // next step (play)
                     buttons.webaudioplaybtn = true;
