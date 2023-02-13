@@ -660,7 +660,24 @@
                 resetButtonsExcept(self.id);
                 // update data
                 let ab = await response.arrayBuffer();
-                hcaFileData.original.data = new Uint8Array(ab);
+                // parse AWB
+                AWBFileName = null;
+                parsedAWB = null;
+                if (AWBArchive.isAWB(new Uint8Array(ab))) {
+                    try {
+                        parsedAWB = new AWBArchive(new Uint8Array(ab));
+                    } catch (e) {
+                        console.error(`error parsing AWB archive`, e);
+                    }
+                }
+                if (parsedAWB != null && parsedAWB.hcaFiles.length > 0) {
+                    AWBFileName = fileName;
+                    setAWBSubSongSwitcher(true);
+                    AWBSubsongSelect({ id: "awb_subsong_index_0" }, true); // doNotPlay=true, will play in "drop" event
+                } else {
+                    setAWBSubSongSwitcher(null);
+                    hcaFileData.original.data = new Uint8Array(ab);
+                }
                 self.textContent = "download (successful)";
                 // find valid key
                 await testAndFindValidKeyAsync();
