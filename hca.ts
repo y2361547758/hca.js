@@ -3540,6 +3540,16 @@ class HCAAudioWorkletHCAPlayer {
     private readonly hcaPlayerNode: AudioWorkletNode;
     private readonly gainNode: GainNode;
 
+    get volume(): number {
+        return this.gainNode.gain.value;
+    }
+    set volume(val: number) {
+        if (isNaN(val)) return;
+        if (val > 1.0) val = 1.0;
+        if (val < 0) val = 0;
+        this.gainNode.gain.value = val;
+    }
+
     private readonly taskQueue: HCATaskQueue;
 
     private async taskHandler(task: HCATask): Promise<Uint8Array | undefined> {

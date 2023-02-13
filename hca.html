@@ -42,6 +42,7 @@
     <button id="awresumebtn">Play/Resume</button><br>
     <button id="awpausebtn">Pause</button><br>
     <button id="awstopbtn">Stop</button><br>
+    <a href="#volumeslider">Volume control</a> (in "decoding parameters" section)<br>
     <hr>
     <h3>Decode the whole file</h3>
     Note:<br>
@@ -105,6 +106,8 @@
         Loop count: <input type="number" step="1" min="0" max="99" placeholder="0-99" id="loopcountinput" value="0"><br>
         Volume: <input type="range" step="1" min="0" max="100" placeholder="0-100" id="volumeslider" value="100">
         <input type="number" step="1" min="0" max="100" placeholder="0-100" id="volumeinput" value="100"><br>
+        <i>This volume control affects <a href="#awresumebtn">AudioWorklet</a> and <a
+                href="#webaudioplaybtn">WebAudio</a> playing as well.</i><br>
     </fieldset>
     <fieldset>
         <legend>Decode to HTML5 Audio</legend>
@@ -345,6 +348,9 @@
 
         function setVolume(val) {
             val = Number(val) / 100;
+            if (worker != null && worker.awHcaPlayer != null) {
+                worker.awHcaPlayer.volume = val;
+            }
             if (webAudioLoopPlayer != null) {
                 webAudioLoopPlayer.volume = val;
             }
