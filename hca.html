@@ -1,9 +1,40 @@
 <!DOCTYPE html>
 <html>
 
-<head></head>
+<head>
+    <style type="text/css">
+        body {
+            max-width: 100%;
+            max-height: 100%;
+        }
+
+        body .hidden {
+            display: none;
+            visibility: hidden;
+        }
+
+        body .overlay {
+            position: fixed;
+            z-index: 9999;
+            top: 0;
+            left: 0;
+            height: 100%;
+            width: 100%;
+            justify-content: center;
+            background-color: #000;
+            color: #fff;
+            filter: opacity(0.5);
+        }
+    </style>
+</head>
 
 <body>
+    <div id="audioctx_unlocker" class="hidden">
+        <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);">
+            AudioContext is locked.<br>Click to unlock.
+        </div>
+    </div>
+
     <h1>HCA decoder demo</h1>
     <a href="https://github.com/y2361547758/hca.js">GitHub repo</a>
     <hr>
@@ -520,6 +551,8 @@
         });
 
         // buttons
+        const hcaWorkerLoadedEvent = new CustomEvent("hcaworkerloaded");
+        const audioCtxUnlockedEvent = new CustomEvent("audioctxunlocked");
         const buttons = {
             startworkerbtn: async (self) => {
                 if (worker == null) {
@@ -537,6 +570,7 @@
                     if (HCAWebAudioLoopPlayer == null) HCAWebAudioLoopPlayer = hcaJsModule.HCAWebAudioLoopPlayer;
                     worker = await HCAWorker.create(hcaJsObjUrl);
                     console.log("started background worker");
+                    window.dispatchEvent(hcaWorkerLoadedEvent);
                 }
                 self.disabled = true; // added because button won't grey out if there's any await above
                 buttons.shutdownbtn = true;
@@ -942,7 +976,6 @@
                 get: function () { return onclick; },
             });
         }
-        buttons.startworkerbtn = "click"; // start background worker
         function resetButtonsExcept(exceptBtnID) {
             for (let btnID in buttons) {
                 if (btnID !== exceptBtnID) switch (btnID) {
@@ -1031,6 +1064,17 @@
             // https://stackoverflow.com/questions/46668079/addeventlistener-drop-not-firing
             ev.preventDefault();
         });
+
+        const audioCtxUnlocker = document.getElementById("audioctx_unlocker");
+        function setShowAudioCtxUnlocker(show) {
+            if (show) {
+                audioCtxUnlocker.classList.add("overlay");
+                audioCtxUnlocker.classList.remove("hidden");
+            } else {
+                audioCtxUnlocker.classList.add("hidden");
+            }
+        }
+
         var tryingUnlock = false;
         function tryUnlock() {
             if (worker.awHcaPlayer && !worker.awHcaPlayer.unlocked) {
@@ -1040,7 +1084,11 @@
                     const id = "awresumebtn";
                     const el = document.getElementById(id);
                     el.disabled = true;
-                    _buttons[id](el).then(() => { tryingUnlock = false; });
+                    _buttons[id](el).then(() => {
+                        tryingUnlock = false;
+                        setShowAudioCtxUnlocker(false);
+                        window.dispatchEvent(audioCtxUnlockedEvent);
+                    });
                 }
             }
         }
@@ -1080,6 +1128,7 @@
                         if (worker.awHcaPlayer && !worker.awHcaPlayer.unlocked) {
                             // FIXME temporary workaround
                             console.warn("awHcaPlayer is still locked, give up before clicking " + id);
+                            setShowAudioCtxUnlocker(true);
                             return;
                         }
                     }
@@ -1089,6 +1138,42 @@
                 }
                 clickNextBtn();
             }
+        });
+
+        const handleHashChange = async (ev) => {
+            const hash = window.location.hash;
+            if (hash == null || hash === "" || hash === "#") return;
+            if (document.getElementById(hash.replace(/^#/, "")) != null) return;
+
+            urlinput.value = window.location.hash.replace(/^#/, "");
+
+            const id = "awloadfromurlbtn";
+            const el = document.getElementById(id);
+            el.disabled = true;
+            await new Promise((resolve) => {
+                _buttons[id](el).then(() => {
+                    if (worker.awHcaPlayer.unlocked) {
+                        resolve();
+                        return;
+                    }
+                    setShowAudioCtxUnlocker(true);
+                    const listener = () => {
+                        window.removeEventListener(audioCtxUnlockedEvent.type, listener);
+                        resolve();
+                    }
+                    window.addEventListener(audioCtxUnlockedEvent.type, listener);
+                });
+            });
+
+            buttons.awresumebtn = "click";
+        }
+
+        window.addEventListener("load", () => {
+            window.addEventListener(hcaWorkerLoadedEvent.type, () => {
+                handleHashChange();
+                window.addEventListener("hashchange", handleHashChange);
+            });
+            buttons.startworkerbtn = "click"; // start background worker
         });
     </script>
 </body>
