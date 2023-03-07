@@ -2,6 +2,8 @@ export class HCAInfo {
     private rawHeader: Uint8Array;
 
     version = "";
+    versionMajor = 2;
+    versionMinor = 0;
     dataOffset = 0;
     format = {
         channelCount: 0,
@@ -55,8 +57,12 @@ export class HCAInfo {
     loopStartAtSample = 0;
     loopEndAtSample = 0;
     loopSampleCount = 0;
+    loopStartTime = 0; // in seconds
+    loopEndTime = 0; // in seconds
+    loopDuration = 0; // in seconds
     endAtSample = 0;
     sampleCount = 0;
+    duration = 0; // in seconds
     // full file size / data part (excluding header, just blocks/frames) size
     fullSize = 0;
     dataSize = 0;
@@ -91,9 +97,11 @@ export class HCAInfo {
         }
         const version = {
             main: p.getUint8(4),
-            sub:  p.getUint8(5)
+            sub: p.getUint8(5)
         }
         this.version = version.main + '.' + version.sub;
+        this.versionMajor = version.main;
+        this.versionMinor = version.sub;
         this.dataOffset = p.getUint16(6);
         // verify checksum
         HCACrc16.verify(hca, this.dataOffset - 2);
@@ -226,9 +234,13 @@ export class HCAInfo {
             this.loopStartAtSample = this.loop.start * HCAFrame.SamplesPerFrame + this.loop.droppedHeader;
             this.loopEndAtSample = (this.loop.end + 1) * HCAFrame.SamplesPerFrame - this.loop.droppedFooter;
             this.loopSampleCount = this.loopEndAtSample - this.loopStartAtSample;
+            this.loopStartTime = (this.loopStartAtSample - this.startAtSample) / this.format.samplingRate;
+            this.loopDuration = this.loopSampleCount / this.format.samplingRate;
+            this.loopEndTime = this.loopStartTime + this.loopDuration;
         }
         this.endAtSample = this.hasHeader["loop"] ? this.loopEndAtSample : this.fullEndAtSample;
         this.sampleCount = this.endAtSample - this.startAtSample;
+        this.duration = this.sampleCount / this.format.samplingRate;
         // calculate file/data size
         this.dataSize = this.blockSize * this.format.blockCount;
         this.fullSize = this.dataOffset + this.dataSize;
@@ -248,6 +260,7 @@ export class HCAInfo {
             0 <= this.startAtSample,
             this.startAtSample < this.fullEndAtSample,
             this.fullEndAtSample <= this.fullSampleCount,
+            this.duration > 0,
         ];
         results.find((result, index) => {
             if (!result) {
@@ -259,6 +272,9 @@ export class HCAInfo {
                 this.startAtSample <= this.loopStartAtSample,
                 this.loopStartAtSample < this.loopEndAtSample,
                 this.loopEndAtSample <= this.fullEndAtSample,
+                0 <= this.loopStartTime,
+                this.loopStartTime < this.loopEndTime,
+                this.loopEndTime <= this.duration + 1.0 / this.format.samplingRate,
             ];
             loopChecks.find((result, index) => {
                 if (!result) {
@@ -370,13 +386,12 @@ export class HCAInfo {
             } : undefined,
         }
     }
-    constructor (hca: Uint8Array, changeMask: boolean = false, encrypt: boolean = false) {
+    constructor(hca: Uint8Array, changeMask: boolean = false, encrypt: boolean = false) {
         // if changeMask == true, (un)mask the header sigs in-place
         this.rawHeader = this.parseHeader(hca, changeMask, encrypt, {});
     }
 }
-interface HCAInfoInWavSize
-{
+interface HCAInfoInWavSize {
     bitsPerSample: number,
     sample: number,
     block: number,
@@ -393,43 +408,35 @@ interface HCAInfoInWavSize
     }
 }
 
-class HCAUtilFunc
-{
-    static DivideByRoundUp(value: number, divisor: number): number
-    {
+class HCAUtilFunc {
+    static DivideByRoundUp(value: number, divisor: number): number {
         return Math.ceil(value / divisor);
     }
-    static GetHighNibble(value: number): number
-    {
+    static GetHighNibble(value: number): number {
         if (value > 0xff) throw new Error();
         if (value < -0x80) throw new Error();
         return (value >>> 4) & 0xF;
     }
-    static GetLowNibble(value: number): number
-    {
+    static GetLowNibble(value: number): number {
         if (value > 0xff) throw new Error();
         if (value < -0x80) throw new Error();
         return value & 0xF;
     }
     private static readonly SignedNibbles = [0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1];
-    static GetHighNibbleSigned(value: number)
-    {
+    static GetHighNibbleSigned(value: number) {
         if (value > 0xff) throw new Error();
         if (value < -0x80) throw new Error();
         return this.SignedNibbles[(value >>> 4) & 0xF];
     }
-    static GetLowNibbleSigned(value: number)
-    {
+    static GetLowNibbleSigned(value: number) {
         if (value > 0xff) throw new Error();
         if (value < -0x80) throw new Error();
         return this.SignedNibbles[value & 0xF];
     }
-    static CombineNibbles(high: number, low: number)
-    {
+    static CombineNibbles(high: number, low: number) {
         return ((high << 4) | (low & 0xF)) & 0xFF;
     }
-    static GetNextMultiple(value: number, multiple: number): number
-    {
+    static GetNextMultiple(value: number, multiple: number): number {
         if (multiple <= 0)
             return value;
 
@@ -438,8 +445,7 @@ class HCAUtilFunc
 
         return value + multiple - value % multiple;
     }
-    static SignedBitReverse32(value: number): number
-    {
+    static SignedBitReverse32(value: number): number {
         if (value > 0xffffffff) throw new Error();
         if (value < -0x80000000) throw new Error();
         value = ((value & 0xaaaaaaaa) >>> 1) | ((value & 0x55555555) << 1);
@@ -448,8 +454,7 @@ class HCAUtilFunc
         value = ((value & 0xff00ff00) >>> 8) | ((value & 0x00ff00ff) << 8);
         return ((value & 0xffff0000) >>> 16) | ((value & 0x0000ffff) << 16);
     }
-    static UnsignedBitReverse32(value: number): number
-    {
+    static UnsignedBitReverse32(value: number): number {
         return this.SignedBitReverse32(value) >>> 0;
     }
     static UnsignedBitReverse32Trunc(value: number, bitCount: number): number {
@@ -458,8 +463,7 @@ class HCAUtilFunc
     static SignedBitReverse32Trunc(value: number, bitCount: number): number {
         return this.UnsignedBitReverse32Trunc(value >>> 0, bitCount);
     }
-    static BitReverse8(value: number): number
-    {
+    static BitReverse8(value: number): number {
         if (value > 0xff) throw new Error();
         if (value < -0x80) throw new Error();
         value >>>= 0;
@@ -467,8 +471,7 @@ class HCAUtilFunc
         value = ((value & 0xcc) >>> 2) | ((value & 0x33) << 2);
         return (((value & 0xf0) >>> 4) | ((value & 0x0f) << 4)) >>> 0;
     }
-    static Clamp(value: number, min: number, max: number): number
-    {
+    static Clamp(value: number, min: number, max: number): number {
         if (value < min)
             return min;
         if (value > max)
@@ -481,17 +484,21 @@ class HCAUtilFunc
 }
 
 export class HCA {
-    constructor () {
+    constructor() {
     }
 
-    static decrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array {
-        return this.decryptOrEncrypt(hca, false, key1, key2);
+    static decrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Uint8Array {
+        return this.decryptOrEncrypt(hca, false, key1, key2, subkey);
     }
-    static encrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array {
-        return this.decryptOrEncrypt(hca, true, key1, key2);
+    static encrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Uint8Array {
+        return this.decryptOrEncrypt(hca, true, key1, key2, subkey);
     }
-    static decryptOrEncrypt(hca: Uint8Array, encrypt: boolean, key1?: any, key2?: any): Uint8Array {
+    static decryptOrEncrypt(hca: Uint8Array, encrypt: boolean, key1?: any, key2?: any, subkey?: any): Uint8Array {
         // in-place decryption/encryption
+        // handle subkey
+        let mixed = HCACipher.mixWithSubkey(key1, key2, subkey);
+        key1 = mixed.key1;
+        key2 = mixed.key2;
         // parse header
         let info = new HCAInfo(hca); // throws "Not a HCA file" if mismatch
         if (!encrypt && !info.hasHeader["ciph"]) {
@@ -536,6 +543,81 @@ export class HCA {
         info.modify(hca, "ciph", newCipherData);
         return hca;
     }
+
+    static findKey(
+        hca: Uint8Array, givenKeyList?: [any, any][], subkey?: any, threshold = 0.5, depth = 1024
+    ): [number, number] | undefined {
+        let keyList: [number, number][], unmixedKeyList: [number, number][];
+        if (givenKeyList == null) {
+            keyList = HCAKnownKeys;
+        } else {
+            keyList = givenKeyList.map((keys) => [HCACipher.parseKey(keys[0]), HCACipher.parseKey(keys[1])]);
+            HCAKnownKeys.forEach((keys) => keyList?.push(keys));
+        }
+        unmixedKeyList = keyList.slice();
+
+        if (subkey != null) {
+            // handle subkey
+            keyList = keyList.map((keys) => {
+                let mixed = HCACipher.mixWithSubkey(keys[0], keys[1], subkey);
+                return [mixed.key1, mixed.key2];
+            });
+        }
+
+        // parse header
+        const info = new HCAInfo(hca); // throws "Not a HCA file" if mismatch
+
+        if (info.cipher == 0) return; // not encrypted
+
+        const frame = new HCAFrame(info);
+
+        const scores = keyList.map(() => 0);
+
+        let cipher: HCACipher | undefined;
+        const testKey = (block: Uint8Array, keys: [number, number]): boolean => {
+            if (cipher == null) cipher = new HCACipher(keys[0], keys[1]);
+            // decrypt block
+            block = block.slice();
+            cipher.mask(block, 0, info.blockSize - 2);
+            // test if the key is correct
+            let reader = new HCABitReader(block);
+            let result = false;
+            try {
+                result = HCAPacking.UnpackFrame(frame, reader);
+            } catch (e) { }
+            if (!result) {
+                cipher = undefined;
+            }
+            return result;
+        }
+        let testedBlockCount = 0;
+        for (let i = 0, lastFound = -1; i < info.format.blockCount && i < depth; i++) {
+            let ftell = info.dataOffset + info.blockSize * i;
+            let block = hca.subarray(ftell, ftell + info.blockSize);
+
+            let found = -1;
+            if (lastFound != -1) {
+                // test last found key
+                if (testKey(block, keyList[lastFound])) found = lastFound;
+            }
+            if (found == -1) {
+                // last found key does not match, test others
+                found = keyList.findIndex((keys, index) => index == lastFound ? false : testKey(block, keys));
+            }
+            if (found != -1) {
+                lastFound = found;
+                scores[found]++;
+            }
+
+            testedBlockCount++;
+        }
+        let bestScore = 0, bestIndex = -1;
+        scores.forEach((s, i) => s > bestScore && (bestScore = s, bestIndex = i));
+
+        if (bestIndex == -1 || bestScore / testedBlockCount < threshold) return; // cannot found valid key
+        else return unmixedKeyList[bestIndex];
+    }
+
     static decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0) {
         switch (mode) {
             case 0: // float
@@ -563,6 +645,7 @@ export class HCA {
         let inWavSize = info.calcInWavSize(mode);
 
         // decode blocks (frames)
+        let failedBlocks = [], lastError = undefined;
         for (let i = 0, offset = 0; i < info.format.blockCount; i++) {
             let lastDecodedSamples = i * HCAFrame.SamplesPerFrame;
             let currentDecodedSamples = lastDecodedSamples + HCAFrame.SamplesPerFrame;
@@ -571,7 +654,13 @@ export class HCA {
             }
             let startOffset = info.dataOffset + info.blockSize * i;
             let block = hca.subarray(startOffset, startOffset + info.blockSize);
-            this.decodeBlock(frame, block);
+            try {
+                this.decodeBlock(frame, block);
+            } catch (e) {
+                failedBlocks.push(i);
+                lastError = e;
+                frame = new HCAFrame(info);
+            }
             let wavebuff: Uint8Array;
             if (lastDecodedSamples < info.startAtSample || currentDecodedSamples > info.endAtSample) {
                 // crossing startAtSample/endAtSample, skip/drop specified bytes
@@ -588,6 +677,9 @@ export class HCA {
                 wavebuff = this.writeToPCM(frame, mode, volume, dataPart, offset);
             }
             offset += wavebuff.byteLength;
+        }
+        if (failedBlocks.length > 0) {
+            console.error(`error decoding following blocks, filled zero`, failedBlocks, lastError);
         }
 
         // decoding done, then just copy looping part
@@ -607,8 +699,7 @@ export class HCA {
         return fileBuf;
     }
 
-    static decodeBlock(frame: HCAFrame, block: Uint8Array): void
-    {
+    static decodeBlock(frame: HCAFrame, block: Uint8Array): void {
         let info = frame.Hca;
         if (block.byteLength != info.blockSize) throw new Error();
         // verify checksum
@@ -617,8 +708,7 @@ export class HCA {
         HCADecoder.DecodeFrame(block, frame);
     }
     static writeToPCM(frame: HCAFrame, mode = 32, volume = 1.0,
-        writer?: Uint8Array, ftell?: number): Uint8Array
-    {
+        writer?: Uint8Array, ftell?: number): Uint8Array {
         switch (mode) {
             case 0: // float
             case 8: case 16: case 24: case 32: // integer
@@ -662,8 +752,8 @@ export class HCA {
                         case 24:
                             // there's no setInt24, write 3 bytes with setUint8 respectively
                             f *= 0x7FFFFF;
-                            p.setUint8(ftell    , f       & 0xFF);
-                            p.setUint8(ftell + 1, f >>  8 & 0xFF);
+                            p.setUint8(ftell, f & 0xFF);
+                            p.setUint8(ftell + 1, f >> 8 & 0xFF);
                             p.setUint8(ftell + 2, f >> 16 & 0xFF);
                             ftell += 3;
                             break;
@@ -696,15 +786,14 @@ export class HCA {
         return hca;
     }
 }
-class HCAWav
-{
+class HCAWav {
     readonly fileBuf: Uint8Array;
     readonly dataPart: Uint8Array;
     readonly waveRiff: HCAWavWaveRiffHeader;
     readonly fmt: HCAWavFmtChunk;
     readonly note?: HCAWavCommentChunk;
     readonly smpl?: HCAWaveSmplChunk;
-    constructor (info: HCAInfo, mode = 32, loop = 0) {
+    constructor(info: HCAInfo, mode = 32, loop = 0) {
         switch (mode) {
             case 0: // float
             case 8: case 16: case 24: case 32: // integer
@@ -728,7 +817,7 @@ class HCAWav
         if (info.hasHeader["comm"]) this.note = new HCAWavCommentChunk(info);
         if (info.hasHeader["loop"]) this.smpl = new HCAWaveSmplChunk(info);
         this.waveRiff = new HCAWavWaveRiffHeader(
-              8 + this.fmt.size
+            8 + this.fmt.size
             + (this.note == null ? 0 : 8 + this.note.size)
             + 8 + dataSize
             + (this.smpl == null ? 0 : 8 + this.smpl.size)
@@ -761,10 +850,9 @@ class HCAWav
         if (writtenLength != this.fileBuf.byteLength) throw new Error();
     }
 }
-class HCAWavWaveRiffHeader
-{
+class HCAWavWaveRiffHeader {
     readonly size: number;
-    constructor (size: number) {
+    constructor(size: number) {
         if (isNaN(size)) throw new Error("size must be number");
         size = Math.floor(size);
         if (size <= 0) throw new Error();
@@ -781,8 +869,7 @@ class HCAWavWaveRiffHeader
         return ret;
     }
 }
-class HCAWavFmtChunk
-{
+class HCAWavFmtChunk {
     readonly size = 16;
     readonly formatTag: number;
     readonly channelCount: number;
@@ -790,7 +877,7 @@ class HCAWavFmtChunk
     readonly bytesPerSec: number;
     readonly blockAlign: number;
     readonly bitsPerSample: number;
-    constructor (info: HCAInfo, mode = 32) {
+    constructor(info: HCAInfo, mode = 32) {
         switch (mode) {
             case 0: // float
             case 8: case 16: case 24: case 32: // integer
@@ -822,11 +909,10 @@ class HCAWavFmtChunk
         return ret;
     }
 }
-class HCAWavCommentChunk
-{
+class HCAWavCommentChunk {
     readonly size: number;
     readonly commentBuf: Uint8Array;
-    constructor (info: HCAInfo) {
+    constructor(info: HCAInfo) {
         this.commentBuf = new TextEncoder().encode(info.comment);
         let size = this.commentBuf.byteLength;
         size += 4;
@@ -844,8 +930,7 @@ class HCAWavCommentChunk
         return ret;
     }
 }
-class HCAWaveSmplChunk
-{
+class HCAWaveSmplChunk {
     readonly size = 60;
     readonly manufacturer = 0;
     readonly product = 0;
@@ -861,8 +946,8 @@ class HCAWaveSmplChunk
     readonly loop_Start: number;
     readonly loop_End: number;
     readonly loop_Fraction = 0;
-    readonly loop_PlayCount= 0;
-    constructor (info: HCAInfo) {
+    readonly loop_PlayCount = 0;
+    constructor(info: HCAInfo) {
         if (!info.hasHeader["loop"]) throw new Error("missing \"loop\" header");
         this.samplePeriod = (1 / info.format.samplingRate * 1000000000);
         this.loop_Start = info.loopStartAtSample - info.startAtSample;
@@ -904,16 +989,14 @@ class HCABitReader {
         return this.LengthBits - this.Position;
     }
 
-    constructor (buffer: Uint8Array)
-    {
+    constructor(buffer: Uint8Array) {
         this.Buffer = buffer;
         this.dv = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
         this.LengthBits = buffer.length * 8;
         this.Position = 0;
     }
 
-    ReadInt(bitCount: number): number
-    {
+    ReadInt(bitCount: number): number {
         let value: number = this.PeekInt(bitCount);
         this.Position += bitCount;
         return value;
@@ -923,25 +1006,21 @@ class HCABitReader {
         return this.ReadInt(1) == 1;
     }
 
-    ReadOffsetBinary(bitCount: number, bias: HCAOffsetBias): number
-    {
+    ReadOffsetBinary(bitCount: number, bias: HCAOffsetBias): number {
         let offset: number = (1 << (bitCount - 1)) - bias;
         let value: number = this.PeekInt(bitCount) - offset;
         this.Position += bitCount;
         return value;
     }
 
-    AlignPosition(multiple: number): void
-    {
+    AlignPosition(multiple: number): void {
         this.Position = HCAUtilFunc.GetNextMultiple(this.Position, multiple);
     }
 
-    PeekInt(bitCount: number): number
-    {
+    PeekInt(bitCount: number): number {
         HCAUtilFunc.DebugAssert(bitCount >= 0 && bitCount <= 32);
 
-        if (bitCount > this.Remaining)
-        {
+        if (bitCount > this.Remaining) {
             if (this.Position >= this.LengthBits) return 0;
 
             let extraBits: number = bitCount - this.Remaining;
@@ -951,24 +1030,21 @@ class HCABitReader {
         let byteIndex: number = this.Position / 8;
         let bitIndex: number = this.Position % 8;
 
-        if (bitCount <= 9 && this.Remaining >= 16)
-        {
+        if (bitCount <= 9 && this.Remaining >= 16) {
             let value: number = this.dv.getUint16(byteIndex);
             value &= 0xFFFF >> bitIndex;
             value >>= 16 - bitCount - bitIndex;
             return value;
         }
 
-        if (bitCount <= 17 && this.Remaining >= 24)
-        {
+        if (bitCount <= 17 && this.Remaining >= 24) {
             let value: number = this.dv.getUint16(byteIndex) << 8 | this.dv.getUint8(byteIndex + 2);
             value &= 0xFFFFFF >> bitIndex;
             value >>= 24 - bitCount - bitIndex;
             return value;
         }
 
-        if (bitCount <= 25 && this.Remaining >= 32)
-        {
+        if (bitCount <= 25 && this.Remaining >= 32) {
             let value: number = this.dv.getUint32(byteIndex);
             value &= 0xFFFFFFFF >>> bitIndex;
             value >>= 32 - bitCount - bitIndex;
@@ -977,16 +1053,13 @@ class HCABitReader {
         return this.PeekIntFallback(bitCount);
     }
 
-    private PeekIntFallback(bitCount: number): number
-    {
+    private PeekIntFallback(bitCount: number): number {
         let value: number = 0;
         let byteIndex: number = this.Position / 8;
         let bitIndex: number = this.Position % 8;
 
-        while (bitCount > 0)
-        {
-            if (bitIndex >= 8)
-            {
+        while (bitCount > 0) {
+            if (bitIndex >= 8) {
                 bitIndex = 0;
                 byteIndex++;
             }
@@ -1002,8 +1075,7 @@ class HCABitReader {
         return value;
     }
 }
-enum HCAOffsetBias
-{
+enum HCAOffsetBias {
     /// <summary>
     /// Specifies the bias of an offset binary value. A positive bias can represent one more
     /// positive value than negative value, and a negative bias can represent one more
@@ -1018,78 +1090,66 @@ enum HCAOffsetBias
     Negative = 0,
 }
 
-class HCABitWriter
-{
+class HCABitWriter {
     Buffer: Uint8Array;
     dv: DataView;
     LengthBits: number;
     Position = 0;
-    get Remaining(): number {return this.LengthBits - this.Position;}
+    get Remaining(): number { return this.LengthBits - this.Position; }
 
-    constructor(buffer: Uint8Array)
-    {
+    constructor(buffer: Uint8Array) {
         this.Buffer = buffer;
         this.dv = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
         this.LengthBits = buffer.length * 8;
     }
 
-    public AlignPosition(multiple: number): void
-    {
+    public AlignPosition(multiple: number): void {
         let newPosition = HCAUtilFunc.GetNextMultiple(this.Position, multiple);
         let bits = newPosition - this.Position;
         this.Write(0, bits);
     }
 
-    public Write(value: number, bitCount: number): void
-    {
+    public Write(value: number, bitCount: number): void {
         HCAUtilFunc.DebugAssert(bitCount >= 0 && bitCount <= 32);
 
-        if (bitCount > this.Remaining)
-        {
+        if (bitCount > this.Remaining) {
             throw new Error("Not enough bits left in output buffer");
         }
 
         let byteIndex = this.Position / 8;
         let bitIndex = this.Position % 8;
 
-        if (bitCount <= 9 && this.Remaining >= 16)
-        {
+        if (bitCount <= 9 && this.Remaining >= 16) {
             let outValue = ((value << (16 - bitCount)) & 0xFFFF) >> bitIndex;
             outValue |= this.dv.getUint16(byteIndex);
             this.dv.setUint16(byteIndex, outValue);
         }
 
-        else if (bitCount <= 17 && this.Remaining >= 24)
-        {
+        else if (bitCount <= 17 && this.Remaining >= 24) {
             let outValue = ((value << (24 - bitCount)) & 0xFFFFFF) >> bitIndex;
             outValue |= this.dv.getUint16(byteIndex) << 8 | this.dv.getUint8(byteIndex + 2);
             this.dv.setUint16(byteIndex, outValue >>> 8);
             this.dv.setUint8(byteIndex + 2, outValue & 0xFF);
         }
 
-        else if (bitCount <= 25 && this.Remaining >= 32)
-        {
+        else if (bitCount <= 25 && this.Remaining >= 32) {
             let outValue = (((value << (32 - bitCount)) & 0xFFFFFFFF) >>> bitIndex);
             outValue |= this.dv.getUint32(byteIndex);
             this.dv.setUint32(byteIndex, outValue);
         }
-        else
-        {
+        else {
             this.WriteFallback(value, bitCount);
         }
 
         this.Position += bitCount;
     }
 
-    private WriteFallback(value: number, bitCount: number): void
-    {
+    private WriteFallback(value: number, bitCount: number): void {
         let byteIndex = this.Position / 8;
         let bitIndex = this.Position % 8;
 
-        while (bitCount > 0)
-        {
-            if (bitIndex >= 8)
-            {
+        while (bitCount > 0) {
+            if (bitIndex >= 8) {
                 bitIndex = 0;
                 byteIndex++;
             }
@@ -1109,8 +1169,7 @@ class HCABitWriter
     }
 }
 
-class HCAFrame
-{
+class HCAFrame {
     static readonly SubframesPerFrame = 8;
     static readonly SubFrameSamplesBits = 7;
     static readonly SamplesPerSubFrame = 1 << this.SubFrameSamplesBits;
@@ -1122,14 +1181,12 @@ class HCAFrame
     AcceptableNoiseLevel: number = 0;
     EvaluationBoundary: number = 0;
 
-    constructor (hca: HCAInfo)
-    {
+    constructor(hca: HCAInfo) {
         this.Hca = hca;
         let channelTypes = HCAFrame.GetChannelTypes(hca);
         this.Channels = [];
 
-        for (let i = 0; i < hca.format.channelCount; i++)
-        {
+        for (let i = 0; i < hca.format.channelCount; i++) {
             this.Channels.push(new HCAChannel({
                 Type: channelTypes[i],
                 CodedScaleFactorCount: channelTypes[i] == HCAChannelType.StereoSecondary
@@ -1141,22 +1198,20 @@ class HCAFrame
         this.AthCurve = hca.UseAthCurve ? HCAFrame.ScaleAthCurve(hca.format.samplingRate) : new Uint8Array(HCAFrame.SamplesPerSubFrame);
     }
 
-    private static GetChannelTypes(hca: HCAInfo): HCAChannelType[]
-    {
+    private static GetChannelTypes(hca: HCAInfo): HCAChannelType[] {
         let channelsPerTrack = hca.format.channelCount / hca.compDec.TrackCount;
         if (hca.compDec.StereoBandCount == 0 || channelsPerTrack == 1) { return new Array(8).fill(HCAChannelType); }
 
         const Discrete = HCAChannelType.Discrete;
         const StereoPrimary = HCAChannelType.StereoPrimary;
         const StereoSecondary = HCAChannelType.StereoSecondary;
-        switch (channelsPerTrack)
-        {
+        switch (channelsPerTrack) {
             case 2: return [StereoPrimary, StereoSecondary];
             case 3: return [StereoPrimary, StereoSecondary, Discrete];
             case 4: if (hca.compDec.ChannelConfig != 0) return [StereoPrimary, StereoSecondary, Discrete, Discrete];
-                else return [StereoPrimary, StereoSecondary, StereoPrimary, StereoSecondary];
+            else return [StereoPrimary, StereoSecondary, StereoPrimary, StereoSecondary];
             case 5: if (hca.compDec.ChannelConfig > 2) return [StereoPrimary, StereoSecondary, Discrete, Discrete, Discrete];
-                else return [StereoPrimary, StereoSecondary, Discrete, StereoPrimary, StereoSecondary];
+            else return [StereoPrimary, StereoSecondary, Discrete, StereoPrimary, StereoSecondary];
             case 6: return [StereoPrimary, StereoSecondary, Discrete, Discrete, StereoPrimary, StereoSecondary];
             case 7: return [StereoPrimary, StereoSecondary, Discrete, Discrete, StereoPrimary, StereoSecondary, Discrete];
             case 8: return [StereoPrimary, StereoSecondary, Discrete, Discrete, StereoPrimary, StereoSecondary, StereoPrimary, StereoSecondary];
@@ -1170,26 +1225,22 @@ class HCAFrame
     /// <param name="frequency">The frequency to scale the curve to.</param>
     /// <returns>The scaled ATH curve</returns>
     /// <remarks>The original ATH curve is for a frequency of 41856 Hz.</remarks>
-    private static ScaleAthCurve(frequency: number): Uint8Array
-    {
+    private static ScaleAthCurve(frequency: number): Uint8Array {
         var ath = new Uint8Array(HCAFrame.SamplesPerSubFrame);
 
         let acc = 0;
         let i;
-        for (i = 0; i < ath.length; i++)
-        {
+        for (i = 0; i < ath.length; i++) {
             acc += frequency;
             let index = acc >> 13;
 
-            if (index >= HCATables.AthCurve.length)
-            {
+            if (index >= HCATables.AthCurve.length) {
                 break;
             }
             ath[i] = HCATables.AthCurve[index];
         }
 
-        for (; i < ath.length; i++)
-        {
+        for (; i < ath.length; i++) {
             ath[i] = 0xff;
         }
 
@@ -1197,14 +1248,13 @@ class HCAFrame
     }
 }
 
-class HCAChannel
-{
+class HCAChannel {
     Type: HCAChannelType = 0;
     CodedScaleFactorCount = 0;
-    PcmFloat: Float64Array[] = Array.from({length: HCAFrame.SubframesPerFrame}, () => new Float64Array(HCAFrame.SamplesPerSubFrame));
-    Spectra: Float64Array[] = Array.from({length: HCAFrame.SubframesPerFrame}, () => new Float64Array(HCAFrame.SamplesPerSubFrame));
-    ScaledSpectra: Float64Array[] = Array.from({length: HCAFrame.SamplesPerSubFrame}, () => new Float64Array(HCAFrame.SubframesPerFrame));
-    QuantizedSpectra: Int32Array[] = Array.from({length: HCAFrame.SubframesPerFrame}, () => new Int32Array(HCAFrame.SamplesPerSubFrame));
+    PcmFloat: Float64Array[] = Array.from({ length: HCAFrame.SubframesPerFrame }, () => new Float64Array(HCAFrame.SamplesPerSubFrame));
+    Spectra: Float64Array[] = Array.from({ length: HCAFrame.SubframesPerFrame }, () => new Float64Array(HCAFrame.SamplesPerSubFrame));
+    ScaledSpectra: Float64Array[] = Array.from({ length: HCAFrame.SamplesPerSubFrame }, () => new Float64Array(HCAFrame.SubframesPerFrame));
+    QuantizedSpectra: Int32Array[] = Array.from({ length: HCAFrame.SubframesPerFrame }, () => new Int32Array(HCAFrame.SamplesPerSubFrame));
     Gain: Float64Array = new Float64Array(HCAFrame.SamplesPerSubFrame);
     Intensity: Int32Array = new Int32Array(HCAFrame.SubframesPerFrame);
     HfrScales: Int32Array = new Int32Array(8);
@@ -1214,7 +1264,7 @@ class HCAChannel
     Resolution: Int32Array = new Int32Array(HCAFrame.SamplesPerSubFrame);
     HeaderLengthBits = 0;
     ScaleFactorDeltaBits = 0;
-    constructor (values: Record<string, any>) {
+    constructor(values: Record<string, any>) {
         let t = this as any;
         for (let key in values) {
             t[key] = values[key];
@@ -1222,59 +1272,47 @@ class HCAChannel
     }
 }
 
-enum HCAChannelType
-{
+enum HCAChannelType {
     Discrete = 0,
     StereoPrimary = 1,
     StereoSecondary = 2,
 }
 
-class HCADecoder
-{
-    static DecodeFrame(audio: Uint8Array, frame: HCAFrame): void
-    {
+class HCADecoder {
+    static DecodeFrame(audio: Uint8Array, frame: HCAFrame): void {
         let reader = new HCABitReader(audio);
-        HCAPacking.UnpackFrame(frame, reader);
+        if (!HCAPacking.UnpackFrame(frame, reader)) throw new Error(`UnpackFrame failed`);
         this.DequantizeFrame(frame);
         this.RestoreMissingBands(frame);
         this.RunImdct(frame);
     }
 
-    private static DequantizeFrame(frame: HCAFrame): void
-    {
-        for (let channel of frame.Channels)
-        {
+    private static DequantizeFrame(frame: HCAFrame): void {
+        for (let channel of frame.Channels) {
             this.CalculateGain(channel);
         }
 
-        for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++)
-        {
-            for (let channel of frame.Channels)
-            {
-                for (let s = 0; s < channel.CodedScaleFactorCount; s++)
-                {
+        for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
+            for (let channel of frame.Channels) {
+                for (let s = 0; s < channel.CodedScaleFactorCount; s++) {
                     channel.Spectra[sf][s] = channel.QuantizedSpectra[sf][s] * channel.Gain[s];
                 }
             }
         }
     }
 
-    private static RestoreMissingBands(frame: HCAFrame): void
-    {
+    private static RestoreMissingBands(frame: HCAFrame): void {
         this.ReconstructHighFrequency(frame);
         this.ApplyIntensityStereo(frame);
     }
 
-    private static CalculateGain(channel: HCAChannel): void
-    {
-        for (let i = 0; i < channel.CodedScaleFactorCount; i++)
-        {
+    private static CalculateGain(channel: HCAChannel): void {
+        for (let i = 0; i < channel.CodedScaleFactorCount; i++) {
             channel.Gain[i] = HCATables.DequantizerScalingTable[channel.ScaleFactors[i]] * HCATables.QuantizerStepSize[channel.Resolution[i]];
         }
     }
 
-    private static ReconstructHighFrequency(frame: HCAFrame): void
-    {
+    private static ReconstructHighFrequency(frame: HCAFrame): void {
         let hca = frame.Hca;
         if (hca.HfrGroupCount == 0) return;
 
@@ -1284,19 +1322,15 @@ class HCADecoder
         let hfrStartBand = hca.compDec.BaseBandCount + hca.compDec.StereoBandCount;
         let hfrBandCount = Math.min(hca.compDec.HfrBandCount, totalBandCount - hca.compDec.HfrBandCount);
 
-        for (let channel of frame.Channels)
-        {
+        for (let channel of frame.Channels) {
             if (channel.Type == HCAChannelType.StereoSecondary) continue;
 
-            for (let group = 0, band = 0; group < hca.HfrGroupCount; group++)
-            {
-                for (let i = 0; i < hca.compDec.BandsPerHfrGroup && band < hfrBandCount; band++, i++)
-                {
+            for (let group = 0, band = 0; group < hca.HfrGroupCount; group++) {
+                for (let i = 0; i < hca.compDec.BandsPerHfrGroup && band < hfrBandCount; band++, i++) {
                     let highBand = hfrStartBand + band;
                     let lowBand = hfrStartBand - band - 1;
                     let index = channel.HfrScales[group] - channel.ScaleFactors[lowBand] + 64;
-                    for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++)
-                    {
+                    for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
                         channel.Spectra[sf][highBand] = HCATables.ScaleConversionTable[index] * channel.Spectra[sf][lowBand];
                     }
                 }
@@ -1304,20 +1338,16 @@ class HCADecoder
         }
     }
 
-    private static ApplyIntensityStereo(frame: HCAFrame): void
-    {
+    private static ApplyIntensityStereo(frame: HCAFrame): void {
         if (frame.Hca.compDec.StereoBandCount <= 0) return;
-        for (let c = 0; c < frame.Channels.length; c++)
-        {
+        for (let c = 0; c < frame.Channels.length; c++) {
             if (frame.Channels[c].Type != HCAChannelType.StereoPrimary) continue;
-            for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++)
-            {
+            for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
                 let l = frame.Channels[c].Spectra[sf];
                 let r = frame.Channels[c + 1].Spectra[sf];
                 let ratioL = HCATables.IntensityRatioTable[frame.Channels[c + 1].Intensity[sf]];
                 let ratioR = ratioL - 2.0;
-                for (let b = frame.Hca.compDec.BaseBandCount; b < frame.Hca.compDec.TotalBandCount; b++)
-                {
+                for (let b = frame.Hca.compDec.BaseBandCount; b < frame.Hca.compDec.TotalBandCount; b++) {
                     r[b] = l[b] * ratioR;
                     l[b] *= ratioL;
                 }
@@ -1325,12 +1355,9 @@ class HCADecoder
         }
     }
 
-    private static RunImdct(frame: HCAFrame): void
-    {
-        for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++)
-        {
-            for (let channel of frame.Channels)
-            {
+    private static RunImdct(frame: HCAFrame): void {
+        for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
+            for (let channel of frame.Channels) {
                 channel.Mdct.RunImdct(channel.Spectra[sf], channel.PcmFloat[sf]);
             }
         }
@@ -1338,74 +1365,64 @@ class HCADecoder
 
 }
 
-class HCAPacking
-{
-    public static UnpackFrame(frame: HCAFrame, reader: HCABitReader): boolean
-    {
+class HCAPacking {
+    public static UnpackFrame(frame: HCAFrame, reader: HCABitReader): boolean {
         if (!this.UnpackFrameHeader(frame, reader)) return false;
         this.ReadSpectralCoefficients(frame, reader);
         return this.UnpackingWasSuccessful(frame, reader);
     }
 
-    public static PackFrame(frame: HCAFrame, outBuffer: Uint8Array): void
-    {
+    public static PackFrame(frame: HCAFrame, outBuffer: Uint8Array): void {
         var writer = new HCABitWriter(outBuffer);
         writer.Write(0xffff, 16);
         writer.Write(frame.AcceptableNoiseLevel, 9);
         writer.Write(frame.EvaluationBoundary, 7);
 
-        for (let channel of frame.Channels)
-        {
+        for (let channel of frame.Channels) {
             this.WriteScaleFactors(writer, channel);
-            if (channel.Type == HCAChannelType.StereoSecondary)
-            {
-                for (let i = 0; i < HCAFrame.SubframesPerFrame; i++)
-                {
+            if (channel.Type == HCAChannelType.StereoSecondary) {
+                for (let i = 0; i < HCAFrame.SubframesPerFrame; i++) {
                     writer.Write(channel.Intensity[i], 4);
                 }
             }
-            else if (frame.Hca.HfrGroupCount > 0)
-            {
-                for (let i = 0; i < frame.Hca.HfrGroupCount; i++)
-                {
+            else if (frame.Hca.HfrGroupCount > 0) {
+                for (let i = 0; i < frame.Hca.HfrGroupCount; i++) {
                     writer.Write(channel.HfrScales[i], 6);
                 }
             }
         }
 
-        for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++)
-        {
-            for (let channel of frame.Channels)
-            {
+        for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
+            for (let channel of frame.Channels) {
                 this.WriteSpectra(writer, channel, sf);
             }
         }
 
         writer.AlignPosition(8);
-        for (let i = writer.Position / 8; i < frame.Hca.blockSize - 2; i++)
-        {
+        for (let i = writer.Position / 8; i < frame.Hca.blockSize - 2; i++) {
             writer.dv.setUint8(i, 0);
         }
 
         this.WriteChecksum(writer, outBuffer);
     }
 
-    public static CalculateResolution(scaleFactor: number, noiseLevel: number): number
-    {
-        if (scaleFactor == 0)
-        {
+    public static CalculateResolution(scaleFactor: number, noiseLevel: number, versionMajor: number): number {
+        if (scaleFactor == 0) {
             return 0;
         }
         let curvePosition = noiseLevel - (5 * scaleFactor >> 1) + 2;
-        curvePosition = HCAUtilFunc.Clamp(curvePosition, 0, 58);
+        //https://github.com/vgmstream/vgmstream/blob/4eecdada9a03a73af0c7c17f5cd6e08518fd7e3f/src/coding/hca_decoder_clhca.c#L1450
+        //FIXME hca2.0 decoding breaks if conditional (ternary) operator is removed
+        //curvePosition = HCAUtilFunc.Clamp(curvePosition, 0, 67);
+        curvePosition = HCAUtilFunc.Clamp(curvePosition, 0, versionMajor <= 2 ? 58 : 67);
         return HCATables.ScaleToResolutionCurve[curvePosition];
     }
 
-    private static UnpackFrameHeader(frame: HCAFrame, reader: HCABitReader): boolean
-    {
+    private static UnpackFrameHeader(frame: HCAFrame, reader: HCABitReader): boolean {
+        let hca = frame.Hca;
+
         let syncWord = reader.ReadInt(16);
-        if (syncWord != 0xffff)
-        {
+        if (syncWord != 0xffff) {
             throw new Error("Invalid frame header");
         }
 
@@ -1413,91 +1430,160 @@ class HCAPacking
         frame.AcceptableNoiseLevel = reader.ReadInt(9);
         frame.EvaluationBoundary = reader.ReadInt(7);
 
-        for (let channel of frame.Channels)
-        {
-            if (!this.ReadScaleFactors(channel, reader)) return false;
+        for (let channel of frame.Channels) {
+            if (!this.ReadScaleFactors(channel, reader, hca.HfrGroupCount, hca.versionMajor)) return false;
 
-            for (let i = 0; i < frame.EvaluationBoundary; i++)
-            {
-                channel.Resolution[i] = this.CalculateResolution(channel.ScaleFactors[i], athCurve[i] + frame.AcceptableNoiseLevel - 1);
+            // added clamp
+            //https://github.com/vgmstream/vgmstream/blob/4eecdada9a03a73af0c7c17f5cd6e08518fd7e3f/src/coding/hca_decoder_clhca.c#L1462
+            for (let i = 0; i < frame.EvaluationBoundary; i++) {
+                let newResolution = this.CalculateResolution(
+                    channel.ScaleFactors[i],
+                    athCurve[i] + frame.AcceptableNoiseLevel - 1,
+                    hca.versionMajor
+                );
+                if (hca.versionMajor > 2) newResolution = HCAUtilFunc.Clamp(
+                    newResolution,
+                    hca.compDec.MinResolution,
+                    hca.compDec.MaxResolution
+                );
+                channel.Resolution[i] = newResolution;
             }
 
-            for (let i = frame.EvaluationBoundary; i < channel.CodedScaleFactorCount; i++)
-            {
-                channel.Resolution[i] = this.CalculateResolution(channel.ScaleFactors[i], athCurve[i] + frame.AcceptableNoiseLevel);
+            for (let i = frame.EvaluationBoundary; i < channel.CodedScaleFactorCount; i++) {
+                let newResolution = this.CalculateResolution(
+                    channel.ScaleFactors[i],
+                    athCurve[i] + frame.AcceptableNoiseLevel,
+                    hca.versionMajor
+                );
+                if (hca.versionMajor > 2) newResolution = HCAUtilFunc.Clamp(
+                    newResolution,
+                    hca.compDec.MinResolution,
+                    hca.compDec.MaxResolution
+                );
+                channel.Resolution[i] = newResolution;
             }
 
-            if (channel.Type == HCAChannelType.StereoSecondary)
-            {
-                this.ReadIntensity(reader, channel.Intensity);
+            if (channel.Type == HCAChannelType.StereoSecondary) {
+                this.ReadIntensity(reader, channel.Intensity, hca.versionMajor);
             }
-            else if (frame.Hca.HfrGroupCount > 0)
-            {
-                this.ReadHfrScaleFactors(reader, frame.Hca.HfrGroupCount, channel.HfrScales);
+            else if (frame.Hca.HfrGroupCount > 0) {
+                if (hca.versionMajor <= 2) this.ReadHfrScaleFactors(reader, frame.Hca.HfrGroupCount, channel.HfrScales);
+                // v3.0 uses values derived in ReadScaleFactors
             }
         }
         return true;
     }
 
-    private static ReadScaleFactors(channel: HCAChannel, reader: HCABitReader): boolean
-    {
+    private static ReadScaleFactors(
+        channel: HCAChannel, reader: HCABitReader, hfrGroupCount: number, versionMajor: number
+    ): boolean {
         channel.ScaleFactorDeltaBits = reader.ReadInt(3);
-        if (channel.ScaleFactorDeltaBits == 0)
-        {
+        if (channel.ScaleFactorDeltaBits == 0) {
             channel.ScaleFactors.fill(0, 0, channel.ScaleFactors.length);
             return true;
         }
 
-        if (channel.ScaleFactorDeltaBits >= 6)
-        {
-            for (let i = 0; i < channel.CodedScaleFactorCount; i++)
-            {
+        // added in v3.0
+        // https://github.com/vgmstream/vgmstream/blob/4eecdada9a03a73af0c7c17f5cd6e08518fd7e3f/src/coding/hca_decoder_clhca.c#L1287
+        let extraCodedScaleFactorCount: number;
+        let codedScaleFactorCount: number;
+        if (channel.Type == HCAChannelType.StereoSecondary || hfrGroupCount <= 0 || versionMajor <= 2) {
+            extraCodedScaleFactorCount = 0;
+            codedScaleFactorCount = channel.CodedScaleFactorCount;
+        } else {
+            extraCodedScaleFactorCount = hfrGroupCount;
+            codedScaleFactorCount = channel.CodedScaleFactorCount + extraCodedScaleFactorCount;
+
+            // just in case
+            if (codedScaleFactorCount > HCAFrame.SamplesPerSubFrame)
+                throw new Error(`codedScaleFactorCount > HCAFrame.SamplesPerSubFrame`);
+        }
+
+        if (channel.ScaleFactorDeltaBits >= 6) {
+            for (let i = 0; i < codedScaleFactorCount; i++) {
                 channel.ScaleFactors[i] = reader.ReadInt(6);
             }
             return true;
         }
 
-        return this.DeltaDecode(reader, channel.ScaleFactorDeltaBits, 6, channel.CodedScaleFactorCount, channel.ScaleFactors);
+        let result = this.DeltaDecode(reader, channel.ScaleFactorDeltaBits, 6, codedScaleFactorCount, channel.ScaleFactors);
+        if (!result) return result;
+
+        // set derived HFR scales for v3.0
+        //FIXME UNTESTED
+        for (let i = 0; i < extraCodedScaleFactorCount; i++) {
+            channel.HfrScales[codedScaleFactorCount - 1 - i] = channel.ScaleFactors[codedScaleFactorCount - i];
+        }
+
+        return result;
     }
 
-    private static ReadIntensity(reader: HCABitReader, intensity: Int32Array): void
-    {
-        for (let i = 0; i < HCAFrame.SubframesPerFrame; i++)
-        {
-            intensity[i] = reader.ReadInt(4);
+    private static ReadIntensity(reader: HCABitReader, intensity: Int32Array, versionMajor: number): void {
+        if (versionMajor <= 2) {
+            for (let i = 0; i < HCAFrame.SubframesPerFrame; i++) {
+                intensity[i] = reader.ReadInt(4);
+            }
+        } else {
+            //https://github.com/vgmstream/vgmstream/blob/4eecdada9a03a73af0c7c17f5cd6e08518fd7e3f/src/coding/hca_decoder_clhca.c#L1374
+            let value = reader.ReadInt(4);
+            let delta_bits: number;
+
+            if (value < 15) {
+                delta_bits = reader.ReadInt(2); /* +1 */
+
+                intensity[0] = value;
+                if (delta_bits == 3) { /* 3+1 = 4b */
+                    /* fixed intensities */
+                    for (let i = 1; i < HCAFrame.SubframesPerFrame; i++) {
+                        intensity[i] = reader.ReadInt(4);
+                    }
+                } else {
+                    /* delta intensities */
+                    let bmax = (2 << delta_bits) - 1;
+                    let bits = delta_bits + 1;
+
+                    for (let i = 1; i < HCAFrame.SubframesPerFrame; i++) {
+                        let delta = reader.ReadInt(bits);
+                        if (delta == bmax) {
+                            value = reader.ReadInt(4); /* encoded */
+                        } else {
+                            value = value - (bmax >> 1) + delta; /* differential */
+                            if (value > 15) //todo check
+                                throw new Error(`value > 15`); /* not done in lib */
+                        }
+
+                        intensity[i] = value;
+                    }
+                }
+            } else {
+                for (let i = 0; i < HCAFrame.SubframesPerFrame; i++) {
+                    intensity[i] = 7;
+                }
+            }
         }
     }
 
-    private static ReadHfrScaleFactors(reader: HCABitReader, groupCount: number, hfrScale: Int32Array): void
-    {
-        for (let i = 0; i < groupCount; i++)
-        {
+    private static ReadHfrScaleFactors(reader: HCABitReader, groupCount: number, hfrScale: Int32Array): void {
+        for (let i = 0; i < groupCount; i++) {
             hfrScale[i] = reader.ReadInt(6);
         }
     }
 
-    private static ReadSpectralCoefficients(frame: HCAFrame, reader: HCABitReader): void
-    {
-        for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++)
-        {
-            for (let channel of frame.Channels)
-            {
-                for (let s = 0; s < channel.CodedScaleFactorCount; s++)
-                {
+    private static ReadSpectralCoefficients(frame: HCAFrame, reader: HCABitReader): void {
+        for (let sf = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
+            for (let channel of frame.Channels) {
+                for (let s = 0; s < channel.CodedScaleFactorCount; s++) {
                     let resolution = channel.Resolution[s];
                     let bits = HCATables.QuantizedSpectrumMaxBits[resolution];
                     let code = reader.PeekInt(bits);
-                    if (resolution < 8)
-                    {
+                    if (resolution < 8) {
                         bits = HCATables.QuantizedSpectrumBits[resolution][code];
                         channel.QuantizedSpectra[sf][s] = HCATables.QuantizedSpectrumValue[resolution][code];
                     }
-                    else
-                    {
+                    else {
                         // Read the sign-magnitude value. The low bit is the sign
                         let quantizedCoefficient = (code >> 1) * (1 - (code % 2 * 2));
-                        if (quantizedCoefficient == 0)
-                        {
+                        if (quantizedCoefficient == 0) {
                             bits--;
                         }
                         channel.QuantizedSpectra[sf][s] = quantizedCoefficient;
@@ -1510,99 +1596,85 @@ class HCAPacking
         }
     }
 
-    private static DeltaDecode(reader: HCABitReader, deltaBits: number, dataBits: number, count: number, output: Int32Array): boolean
-    {
+    private static DeltaDecode(reader: HCABitReader, deltaBits: number, dataBits: number, count: number, output: Int32Array): boolean {
         output[0] = reader.ReadInt(dataBits);
         let maxDelta = 1 << (deltaBits - 1);
         let maxValue = (1 << dataBits) - 1;
 
-        for (let i = 1; i < count; i++)
-        {
+        for (let i = 1; i < count; i++) {
             let delta = reader.ReadOffsetBinary(deltaBits, HCAOffsetBias.Positive);
 
-            if (delta < maxDelta)
-            {
+            if (delta < maxDelta) {
                 let value = output[i - 1] + delta;
-                if (value < 0 || value > maxValue)
-                {
+                if (value < 0 || value > maxValue) {
                     return false;
                 }
+
+                // https://github.com/vgmstream/vgmstream/blob/4eecdada9a03a73af0c7c17f5cd6e08518fd7e3f/src/coding/hca_decoder_clhca.c#L1327
+                //value &= 0x3F; // v3.0 lib
+
                 output[i] = value;
             }
-            else
-            {
+            else {
                 output[i] = reader.ReadInt(dataBits);
             }
         }
         return true;
     }
 
-    private static UnpackingWasSuccessful(frame: HCAFrame, reader: HCABitReader): boolean
-    {
+    private static UnpackingWasSuccessful(frame: HCAFrame, reader: HCABitReader): boolean {
         // 128 leftover bits after unpacking should be high enough to get rid of false negatives,
         // and low enough that false positives will be uncommon.
         return reader.Remaining >= 16 && reader.Remaining <= 128
-               || this.FrameEmpty(frame)
-               || frame.AcceptableNoiseLevel == 0 && reader.Remaining >= 16;
+            || this.FrameEmpty(frame)
+            || frame.AcceptableNoiseLevel == 0 && reader.Remaining >= 16;
     }
 
-    private static FrameEmpty(frame: HCAFrame): boolean
-    {
+    private static FrameEmpty(frame: HCAFrame): boolean {
         if (frame.AcceptableNoiseLevel > 0) return false;
 
         // If all the scale factors are 0, the frame is empty
-        for (let channel of frame.Channels)
-        {
-            if (channel.ScaleFactorDeltaBits > 0)
-            {
+        for (let channel of frame.Channels) {
+            if (channel.ScaleFactorDeltaBits > 0) {
                 return false;
             }
         }
         return true;
     }
 
-    private static WriteChecksum(writer: HCABitWriter, hcaBuffer: Uint8Array): void
-    {
+    private static WriteChecksum(writer: HCABitWriter, hcaBuffer: Uint8Array): void {
         writer.Position = writer.LengthBits - 16;
         let crc16 = HCACrc16.calc(hcaBuffer, hcaBuffer.length - 2);
         writer.Write(crc16, 16);
     }
 
-    private static WriteSpectra(writer: HCABitWriter, channel: HCAChannel, subFrame: number): void
-    {
-        for (let i = 0; i < channel.CodedScaleFactorCount; i++)
-        {
+    private static WriteSpectra(writer: HCABitWriter, channel: HCAChannel, subFrame: number): void {
+        for (let i = 0; i < channel.CodedScaleFactorCount; i++) {
             let resolution = channel.Resolution[i];
             let quantizedSpectra = channel.QuantizedSpectra[subFrame][i];
             if (resolution == 0) continue;
-            if (resolution < 8)
-            {
+            if (resolution < 8) {
                 let bits = HCATables.QuantizeSpectrumBits[resolution][quantizedSpectra + 8];
                 writer.Write(HCATables.QuantizeSpectrumValue[resolution][quantizedSpectra + 8], bits);
             }
-            else if (resolution < 16)
-            {
+            else if (resolution < 16) {
                 let bits = HCATables.QuantizedSpectrumMaxBits[resolution] - 1;
                 writer.Write(Math.abs(quantizedSpectra), bits);
-                if (quantizedSpectra != 0)
-                {
+                if (quantizedSpectra != 0) {
                     writer.Write(quantizedSpectra > 0 ? 0 : 1, 1);
                 }
             }
         }
     }
 
-    private static WriteScaleFactors(writer: HCABitWriter, channel: HCAChannel): void
-    {
+    private static WriteScaleFactors(writer: HCABitWriter, channel: HCAChannel): void {
         let deltaBits = channel.ScaleFactorDeltaBits;
         let scales = channel.ScaleFactors;
         writer.Write(deltaBits, 3);
         if (deltaBits == 0) return;
 
-        if (deltaBits == 6)
-        {
-            for (let i = 0; i < channel.CodedScaleFactorCount; i++)
-            {
+        if (deltaBits == 6) {
+            for (let i = 0; i < channel.CodedScaleFactorCount; i++) {
                 writer.Write(scales[i], 6);
             }
             return;
@@ -1612,24 +1684,20 @@ class HCAPacking
         let maxDelta = (1 << (deltaBits - 1)) - 1;
         let escapeValue = (1 << deltaBits) - 1;
 
-        for (let i = 1; i < channel.CodedScaleFactorCount; i++)
-        {
+        for (let i = 1; i < channel.CodedScaleFactorCount; i++) {
             let delta = scales[i] - scales[i - 1];
-            if (Math.abs(delta) > maxDelta)
-            {
+            if (Math.abs(delta) > maxDelta) {
                 writer.Write(escapeValue, deltaBits);
                 writer.Write(scales[i], 6);
             }
-            else
-            {
+            else {
                 writer.Write(maxDelta + delta, deltaBits);
             }
         }
     }
 }
 
-class HCAMdct
-{
+class HCAMdct {
 
     MdctBits: number;
     MdctSize: number;
@@ -1647,16 +1715,14 @@ class HCAMdct
     private readonly _scratchMdct: Float64Array;
     private readonly _scratchDct: Float64Array;
 
-    constructor (mdctBits: number, window: Float64Array, scale = 1)
-    {
+    constructor(mdctBits: number, window: Float64Array, scale = 1) {
         HCAMdct.SetTables(mdctBits);
 
         this.MdctBits = mdctBits;
         this.MdctSize = 1 << mdctBits;
         this.Scale = scale;
 
-        if (window.length < this.MdctSize)
-        {
+        if (window.length < this.MdctSize) {
             throw new Error("Window must be as long as the MDCT size.");
         }
 
@@ -1667,12 +1733,9 @@ class HCAMdct
         this._imdctWindow = window;
     }
 
-    private static SetTables(maxBits: number): void
-    {
-        if (maxBits > this._tableBits)
-        {
-            for (let i = this._tableBits + 1; i <= maxBits; i++)
-            {
+    private static SetTables(maxBits: number): void {
+        if (maxBits > this._tableBits) {
+            for (let i = this._tableBits + 1; i <= maxBits; i++) {
                 let out = this.GenerateTrigTables(i);
                 this.SinTables.push(out.sin);
                 this.CosTables.push(out.cos);
@@ -1682,15 +1745,12 @@ class HCAMdct
         }
     }
 
-    public RunMdct(input: Float64Array, output: Float64Array): void
-    {
-        if (input.length < this.MdctSize)
-        {
+    public RunMdct(input: Float64Array, output: Float64Array): void {
+        if (input.length < this.MdctSize) {
             throw new Error("Input must be as long as the MDCT size.");
         }
 
-        if (output.length < this.MdctSize)
-        {
+        if (output.length < this.MdctSize) {
             throw new Error("Output must be as long as the MDCT size.");
         }
 
@@ -1698,8 +1758,7 @@ class HCAMdct
         let half = (size >> 1);
         let dctIn = this._scratchMdct;
 
-        for (let i = 0; i < half; i++)
-        {
+        for (let i = 0; i < half; i++) {
             let a = this._imdctWindow[half - i - 1] * -input[half + i];
             let b = this._imdctWindow[half + i] * input[half - i - 1];
             let c = this._imdctWindow[i] * this._mdctPrevious[i];
@@ -1713,15 +1772,12 @@ class HCAMdct
         this._mdctPrevious.set(input, input.length);
     }
 
-    public RunImdct(input: Float64Array, output: Float64Array): void
-    {
-        if (input.length < this.MdctSize)
-        {
+    public RunImdct(input: Float64Array, output: Float64Array): void {
+        if (input.length < this.MdctSize) {
             throw new Error("Input must be as long as the MDCT size.");
         }
 
-        if (output.length < this.MdctSize)
-        {
+        if (output.length < this.MdctSize) {
             throw new Error("Output must be as long as the MDCT size.");
         }
 
@@ -1731,8 +1787,7 @@ class HCAMdct
 
         this.Dct4(input, dctOut);
 
-        for (let i = 0; i < half; i++)
-        {
+        for (let i = 0; i < half; i++) {
             output[i] = this._imdctWindow[i] * dctOut[i + half] + this._imdctPrevious[i];
             output[i + half] = this._imdctWindow[i + half] * -dctOut[size - 1 - i] - this._imdctPrevious[i + half];
             this._imdctPrevious[i] = this._imdctWindow[size - 1 - i] * -dctOut[half - i - 1];
@@ -1745,8 +1800,7 @@ class HCAMdct
     /// </summary>
     /// <param name="input">The input array containing the time or frequency-domain samples</param>
     /// <param name="output">The output array that will contain the transformed time or frequency-domain samples</param>
-    private Dct4(input: Float64Array, output: Float64Array): void
-    {
+    private Dct4(input: Float64Array, output: Float64Array): void {
         let shuffleTable = HCAMdct.ShuffleTables[this.MdctBits];
         let sinTable = HCAMdct.SinTables[this.MdctBits];
         let cosTable = HCAMdct.CosTables[this.MdctBits];
@@ -1756,8 +1810,7 @@ class HCAMdct
         let lastIndex = size - 1;
         let halfSize = (size >> 1);
 
-        for (let i = 0; i < halfSize; i++)
-        {
+        for (let i = 0; i < halfSize; i++) {
             let i2 = i * 2;
             let a = input[i2];
             let b = input[lastIndex - i2];
@@ -1768,8 +1821,7 @@ class HCAMdct
         }
         let stageCount = this.MdctBits - 1;
 
-        for (let stage = 0; stage < stageCount; stage++)
-        {
+        for (let stage = 0; stage < stageCount; stage++) {
             let blockCount = 1 << stage;
             let blockSizeBits = stageCount - stage;
             let blockHalfSizeBits = blockSizeBits - 1;
@@ -1778,10 +1830,8 @@ class HCAMdct
             sinTable = HCAMdct.SinTables[blockHalfSizeBits];
             cosTable = HCAMdct.CosTables[blockHalfSizeBits];
 
-            for (let block = 0; block < blockCount; block++)
-            {
-                for (let i = 0; i < blockHalfSize; i++)
-                {
+            for (let block = 0; block < blockCount; block++) {
+                for (let i = 0; i < blockHalfSize; i++) {
                     let frontPos = (block * blockSize + i) * 2;
                     let backPos = frontPos + blockSize;
                     let a = dctTemp[frontPos] - dctTemp[backPos];
@@ -1796,22 +1846,19 @@ class HCAMdct
             }
         }
 
-        for (let i = 0; i < this.MdctSize; i++)
-        {
+        for (let i = 0; i < this.MdctSize; i++) {
             output[i] = dctTemp[shuffleTable[i]] * this.Scale;
         }
     }
 
-    private static GenerateTrigTables(sizeBits: number): {sin: Float64Array, cos: Float64Array}
-    {
+    private static GenerateTrigTables(sizeBits: number): { sin: Float64Array, cos: Float64Array } {
         let size = 1 << sizeBits;
-        let out: {sin: Float64Array, cos: Float64Array} = {
+        let out: { sin: Float64Array, cos: Float64Array } = {
             sin: new Float64Array(size),
             cos: new Float64Array(size)
         };
 
-        for (let i = 0; i < size; i++)
-        {
+        for (let i = 0; i < size; i++) {
             let value = Math.PI * (4 * i + 1) / (4 * size);
             out.sin[i] = Math.sin(value);
             out.cos[i] = Math.cos(value);
@@ -1820,13 +1867,11 @@ class HCAMdct
         return out;
     }
 
-    private static GenerateShuffleTable(sizeBits: number): Int32Array
-    {
+    private static GenerateShuffleTable(sizeBits: number): Int32Array {
         let size = 1 << sizeBits;
         var table = new Int32Array(size);
 
-        for (let i = 0; i < size; i++)
-        {
+        for (let i = 0; i < size; i++) {
             table[i] = HCAUtilFunc.SignedBitReverse32Trunc(i ^ (i >> 1), sizeBits);
         }
 
@@ -1839,13 +1884,10 @@ class HCAMdct
     /// </summary>
     /// <param name="input">The input array containing the time or frequency-domain samples</param>
     /// <param name="output">The output array that will contain the transformed time or frequency-domain samples</param>
-    private Dct4Slow(input: Float64Array, output: Float64Array): void
-    {
-        for (let k = 0; k < this.MdctSize; k++)
-        {
+    private Dct4Slow(input: Float64Array, output: Float64Array): void {
+        for (let k = 0; k < this.MdctSize; k++) {
             let sample = 0;
-            for (let n = 0; n < this.MdctSize; n++)
-            {
+            for (let n = 0; n < this.MdctSize; n++) {
                 let angle = Math.PI / this.MdctSize * (k + 0.5) * (n + 0.5);
                 sample += Math.cos(angle) * input[n];
             }
@@ -1854,17 +1896,14 @@ class HCAMdct
     }
 }
 
-class HCATables
-{
-    private static isLittleEndian(): boolean
-    {
+class HCATables {
+    private static isLittleEndian(): boolean {
         let test = new Float64Array([1.0]);
         let dv = new DataView(test.buffer);
         if (dv.getUint32(0) != 0) return false;
         return true;
     }
-    private static adaptEndianness6432(a: Uint32Array): Uint32Array
-    {
+    private static adaptEndianness6432(a: Uint32Array): Uint32Array {
         if (a.byteLength % 8 != 0) throw new Error();
         if (!this.isLittleEndian()) {
             for (let i = 0; i < a.length; i += 2) {
@@ -1987,7 +2026,8 @@ class HCATables
         0x0F, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0E, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0C, 0x0C, 0x0C,
         0x0C, 0x0C, 0x0C, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A, 0x0A,
         0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x07, 0x06, 0x06, 0x05,
-        0x04, 0x04, 0x04, 0x03, 0x03, 0x03, 0x02, 0x02, 0x02, 0x02, 0x01
+        0x04, 0x04, 0x04, 0x03, 0x03, 0x03, 0x02, 0x02, 0x02, 0x02, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+        0x01, 0x01, 0x01, 0x00
     ]);
     static readonly AthCurve = new Uint8Array([
         0x78, 0x5F, 0x56, 0x51, 0x4E, 0x4C, 0x4B, 0x49, 0x48, 0x48, 0x47, 0x46, 0x46, 0x45, 0x45, 0x45,
@@ -2204,22 +2244,22 @@ class HCATables
 
 class HCACrc16 {
     private static _v = new Uint16Array([
-        0x0000,0x8005,0x800F,0x000A,0x801B,0x001E,0x0014,0x8011,0x8033,0x0036,0x003C,0x8039,0x0028,0x802D,0x8027,0x0022,
-        0x8063,0x0066,0x006C,0x8069,0x0078,0x807D,0x8077,0x0072,0x0050,0x8055,0x805F,0x005A,0x804B,0x004E,0x0044,0x8041,
-        0x80C3,0x00C6,0x00CC,0x80C9,0x00D8,0x80DD,0x80D7,0x00D2,0x00F0,0x80F5,0x80FF,0x00FA,0x80EB,0x00EE,0x00E4,0x80E1,
-        0x00A0,0x80A5,0x80AF,0x00AA,0x80BB,0x00BE,0x00B4,0x80B1,0x8093,0x0096,0x009C,0x8099,0x0088,0x808D,0x8087,0x0082,
-        0x8183,0x0186,0x018C,0x8189,0x0198,0x819D,0x8197,0x0192,0x01B0,0x81B5,0x81BF,0x01BA,0x81AB,0x01AE,0x01A4,0x81A1,
-        0x01E0,0x81E5,0x81EF,0x01EA,0x81FB,0x01FE,0x01F4,0x81F1,0x81D3,0x01D6,0x01DC,0x81D9,0x01C8,0x81CD,0x81C7,0x01C2,
-        0x0140,0x8145,0x814F,0x014A,0x815B,0x015E,0x0154,0x8151,0x8173,0x0176,0x017C,0x8179,0x0168,0x816D,0x8167,0x0162,
-        0x8123,0x0126,0x012C,0x8129,0x0138,0x813D,0x8137,0x0132,0x0110,0x8115,0x811F,0x011A,0x810B,0x010E,0x0104,0x8101,
-        0x8303,0x0306,0x030C,0x8309,0x0318,0x831D,0x8317,0x0312,0x0330,0x8335,0x833F,0x033A,0x832B,0x032E,0x0324,0x8321,
-        0x0360,0x8365,0x836F,0x036A,0x837B,0x037E,0x0374,0x8371,0x8353,0x0356,0x035C,0x8359,0x0348,0x834D,0x8347,0x0342,
-        0x03C0,0x83C5,0x83CF,0x03CA,0x83DB,0x03DE,0x03D4,0x83D1,0x83F3,0x03F6,0x03FC,0x83F9,0x03E8,0x83ED,0x83E7,0x03E2,
-        0x83A3,0x03A6,0x03AC,0x83A9,0x03B8,0x83BD,0x83B7,0x03B2,0x0390,0x8395,0x839F,0x039A,0x838B,0x038E,0x0384,0x8381,
-        0x0280,0x8285,0x828F,0x028A,0x829B,0x029E,0x0294,0x8291,0x82B3,0x02B6,0x02BC,0x82B9,0x02A8,0x82AD,0x82A7,0x02A2,
-        0x82E3,0x02E6,0x02EC,0x82E9,0x02F8,0x82FD,0x82F7,0x02F2,0x02D0,0x82D5,0x82DF,0x02DA,0x82CB,0x02CE,0x02C4,0x82C1,
-        0x8243,0x0246,0x024C,0x8249,0x0258,0x825D,0x8257,0x0252,0x0270,0x8275,0x827F,0x027A,0x826B,0x026E,0x0264,0x8261,
-        0x0220,0x8225,0x822F,0x022A,0x823B,0x023E,0x0234,0x8231,0x8213,0x0216,0x021C,0x8219,0x0208,0x820D,0x8207,0x0202
+        0x0000, 0x8005, 0x800F, 0x000A, 0x801B, 0x001E, 0x0014, 0x8011, 0x8033, 0x0036, 0x003C, 0x8039, 0x0028, 0x802D, 0x8027, 0x0022,
+        0x8063, 0x0066, 0x006C, 0x8069, 0x0078, 0x807D, 0x8077, 0x0072, 0x0050, 0x8055, 0x805F, 0x005A, 0x804B, 0x004E, 0x0044, 0x8041,
+        0x80C3, 0x00C6, 0x00CC, 0x80C9, 0x00D8, 0x80DD, 0x80D7, 0x00D2, 0x00F0, 0x80F5, 0x80FF, 0x00FA, 0x80EB, 0x00EE, 0x00E4, 0x80E1,
+        0x00A0, 0x80A5, 0x80AF, 0x00AA, 0x80BB, 0x00BE, 0x00B4, 0x80B1, 0x8093, 0x0096, 0x009C, 0x8099, 0x0088, 0x808D, 0x8087, 0x0082,
+        0x8183, 0x0186, 0x018C, 0x8189, 0x0198, 0x819D, 0x8197, 0x0192, 0x01B0, 0x81B5, 0x81BF, 0x01BA, 0x81AB, 0x01AE, 0x01A4, 0x81A1,
+        0x01E0, 0x81E5, 0x81EF, 0x01EA, 0x81FB, 0x01FE, 0x01F4, 0x81F1, 0x81D3, 0x01D6, 0x01DC, 0x81D9, 0x01C8, 0x81CD, 0x81C7, 0x01C2,
+        0x0140, 0x8145, 0x814F, 0x014A, 0x815B, 0x015E, 0x0154, 0x8151, 0x8173, 0x0176, 0x017C, 0x8179, 0x0168, 0x816D, 0x8167, 0x0162,
+        0x8123, 0x0126, 0x012C, 0x8129, 0x0138, 0x813D, 0x8137, 0x0132, 0x0110, 0x8115, 0x811F, 0x011A, 0x810B, 0x010E, 0x0104, 0x8101,
+        0x8303, 0x0306, 0x030C, 0x8309, 0x0318, 0x831D, 0x8317, 0x0312, 0x0330, 0x8335, 0x833F, 0x033A, 0x832B, 0x032E, 0x0324, 0x8321,
+        0x0360, 0x8365, 0x836F, 0x036A, 0x837B, 0x037E, 0x0374, 0x8371, 0x8353, 0x0356, 0x035C, 0x8359, 0x0348, 0x834D, 0x8347, 0x0342,
+        0x03C0, 0x83C5, 0x83CF, 0x03CA, 0x83DB, 0x03DE, 0x03D4, 0x83D1, 0x83F3, 0x03F6, 0x03FC, 0x83F9, 0x03E8, 0x83ED, 0x83E7, 0x03E2,
+        0x83A3, 0x03A6, 0x03AC, 0x83A9, 0x03B8, 0x83BD, 0x83B7, 0x03B2, 0x0390, 0x8395, 0x839F, 0x039A, 0x838B, 0x038E, 0x0384, 0x8381,
+        0x0280, 0x8285, 0x828F, 0x028A, 0x829B, 0x029E, 0x0294, 0x8291, 0x82B3, 0x02B6, 0x02BC, 0x82B9, 0x02A8, 0x82AD, 0x82A7, 0x02A2,
+        0x82E3, 0x02E6, 0x02EC, 0x82E9, 0x02F8, 0x82FD, 0x82F7, 0x02F2, 0x02D0, 0x82D5, 0x82DF, 0x02DA, 0x82CB, 0x02CE, 0x02C4, 0x82C1,
+        0x8243, 0x0246, 0x024C, 0x8249, 0x0258, 0x825D, 0x8257, 0x0252, 0x0270, 0x8275, 0x827F, 0x027A, 0x826B, 0x026E, 0x0264, 0x8261,
+        0x0220, 0x8225, 0x822F, 0x022A, 0x823B, 0x023E, 0x0234, 0x8231, 0x8213, 0x0216, 0x021C, 0x8219, 0x0208, 0x820D, 0x8207, 0x0202
     ]);
     static calc(data: Uint8Array, size: number): number {
         if (size > data.byteLength) throw new Error();
@@ -2254,6 +2294,55 @@ class HCACrc16 {
     }
 }
 
+const HCAKnownKeys: [number, number][] = [
+    // [lower 32 bits, higher 32 bits]
+    // eg. 6615518E8ECED447 => [0x8ECED447, 0x6615518E]
+
+    // source: https://github.com/Thealexbarney/VGAudio/blob/master/docs/audio-formats/hca/encryption-keys.md
+    [0x000004C8, 0x00000000], // One Piece Treasure Cruise (iOS/Android)
+    [0x00000978, 0x00000000], // Idol Connect (iOS/Android)
+    [0x000022CE, 0x00000000], // BanG Dream! Girls Band Party! (iOS/Android)
+    [0x00003039, 0x00000000], // Fate/Grand Order (iOS/Android) base assets
+    [0x001D149A, 0x00000000], // One Piece Dance Battle (iOS/Android)
+    [0x009134FC, 0x00000000], // Tales of the Rays (iOS/Android)
+    [0x012C9A53, 0x00000000], // Jojo All Star Battle (PS3)
+    [0x012EBCCA, 0x00000000], // Derby Stallion Masters (iOS/Android)
+    [0x012FCFDF, 0x00000000], // Sonic Runners (iOS/Android)
+    [0x01395C51, 0x00000000], // Puella Magi Madoka Magica Side Story: Magia Record (iOS/Android)<br/>Hortensia Saga 0000000002B99F1A // Raramagi (iOS/Android)
+    [0x0E62BEF0, 0x00000000], // Bad Apple Wars (Vita)
+    [0x0E88473C, 0x00000000], // Koi to Senkyo to Chocolate Portable (PSP)
+    [0x49913556, 0x00000000], // Ro-Kyu-Bu! Naisho no Shutter Chance (Vita)
+    [0x77EDA13A, 0x00000000], // Custom Drive (PSP)
+    [0x77EDF21C, 0x00000000], // Ro-Kyu-Bu! Himitsu no Otoshimono (PSP)
+    [0x7235CB29, 0x0000000B], // Skylock - Kamigami to Unmei no Itsutsuko (iOS)
+    [0x222AAA84, 0x00000497], // For Whom the Alchemist Exists (iOS/Android)
+    [0xA6AD6125, 0x00001B85], // SD Gundam Strikers (iOS/Android)
+    [0xF27E3B22, 0x00003657], // Idolm@ster Cinderella Stage (iOS/Android)
+    [0x97978A96, 0x0000968A], // Super Robot Wars X-Omega (iOS/Android)
+    [0x95356C72, 0x0002354E], // Azur Lane (iOS/Android)
+    [0xBC731A85, 0x0002B875], // Idolm@ster Million Live (iOS/Android)
+    [0x0DC57F48, 0x0011DCDD], // Grimoire - Shiritsu Grimoire Mahou Gakuen (iOS/Android)
+    [0x1024ADE9, 0x00189DFB], // Tokyo Ghoul: Re Invoke (iOS/Android)
+    [0x634B5F07, 0x002055C8], // The Tower of Princess (iOS/Android)
+    [0xA11CCFB0, 0x00688884], // Kamen Rider Battle Rush (iOS/Android)
+    [0x8D0C10FD, 0x00A06A0B], // Ikemen Vampire - Ijin-tachi to Koi no Yuuwaku (iOS/Android)
+    [0xCC554639, 0x00DBE1AB], // Old Phantasy Star Online 2
+    [0x5990FB5E, 0x02051AF2], // Fallen Princess (iOS/Android)
+    [0xF5816A2A, 0x29AFE911], // Kurokishi to Shiro no Maou (iOS/Android)
+    [0x83653699, 0x438BF1F8], // Yuyuyui (iOS/Android) *unconfirmed
+    [0xB8E6C6D2, 0x43E4EA62], // World Chain (iOS/Android)
+    [0xC3091366, 0x7CEC81F7], // Diss World (iOS/Android)
+    [0x92EBF464, 0x7E896318], // Fate/Grand Order (iOS/Android) download assets *unconfirmed
+    [0x30DBE1AB, 0xCC554639], // Phantasy Star Online 2
+    [0xE0748978, 0xCF222F1F], // Default key from CRI
+    [0x343D0000, 0xDB5B61B8], // Schoolgirl Strikers: Twinkle Melodies (iOS/Android)
+    [0xAB414BA1, 0xFDAE531A], // Tokyo 7th Sisters (iOS/Android) *unconfirmed
+    [0xFFFFFFFF, 0xFFFFFFFF], // Tekken Mobile (iOS/Android)
+
+    // source: https://github.com/vgmstream/vgmstream/blob/36f4dfeab41adf8f8ff08477dc062f8c76b003d8/src/meta/hca_keys.h#L1059
+    [0x8ECED447, 0x6615518E], // Heaven Burns Red (Android)
+];
+
 class HCACipher {
     static readonly defKey1 = 0x01395C51;
     static readonly defKey2 = 0x00000000;
@@ -2267,15 +2356,15 @@ class HCACipher {
     private init1(): void {
         for (let i = 1, v = 0; i < 0xFF; i++) {
             v = (v * 13 + 11) & 0xFF;
-            if (v == 0 || v == 0xFF)v = (v * 13 + 11) & 0xFF;
+            if (v == 0 || v == 0xFF) v = (v * 13 + 11) & 0xFF;
             this._table[i] = v;
         }
         this._table[0] = 0;
         this._table[0xFF] = 0xFF;
     }
     private init56(): void {
-        let key1 = this.getKey1();
-        let key2 = this.getKey2();
+        let key1 = this.dv1.getUint32(0, true);
+        let key2 = this.dv2.getUint32(0, true);
         if (!key1) key2--;
         key1--;
         this.dv1.setUint32(0, key1, true);
@@ -2314,7 +2403,7 @@ class HCACipher {
         let t = 0;
         key >>= 4;
         for (let i = 0; i < 0x10; i++) {
-            key = (key*mul + add) & 0xF;
+            key = (key * mul + add) & 0xF;
             r[t++] = key;
         }
     }
@@ -2343,29 +2432,63 @@ class HCACipher {
     getEncrypt(): boolean {
         return this.encrypt;
     }
-    getKey1(): number {
-        return this.dv1.getUint32(0, true);
-    }
-    getKey2(): number {
-        return this.dv2.getUint32(0, true);
-    }
     getBytesOfTwoKeys(): Uint8Array {
         let buf = new Uint8Array(8);
         buf.set(new Uint8Array(this.key1buf), 0);
         buf.set(new Uint8Array(this.key2buf), 4);
         return buf;
     }
-    setKey1(key: number): HCACipher {
-        this.dv1.setUint32(0, key, true);
-        this.init56();
-        this.cipherType = 0x38;
-        return this;
+    private static bigUintMultiplyLE(dv: DataView, factor: number): DataView {
+        const result = new DataView(new ArrayBuffer(dv.byteLength + 4));
+        factor = Math.trunc(factor);
+        Array.from({ length: dv.byteLength }, (_, i) => factor * dv.getUint8(i))
+            .forEach((v, i) => {
+                v += result.getUint32(i, true);
+                result.setUint32(i, v, true);
+                v -= result.getUint32(i, true);
+                if (v > 0) {
+                    v /= 0x100000000;
+                    for (let j = i + 4; j < result.byteLength; j++) {
+                        v += result.getUint8(j);
+                        result.setUint8(j, v);
+                        v -= result.getUint8(j);
+                        if (v > 0) v /= 0x100;
+                        else break;
+                    }
+                }
+            });
+        return result;
     }
-    setKey2(key: number): HCACipher {
-        this.dv2.setUint32(0, key, true);
-        this.init56();
-        this.cipherType = 0x38;
-        return this;
+    static mixWithSubkey(key1: any, key2: any, subkey: any): { key1: number, key2: number } {
+        // https://github.com/vgmstream/vgmstream/blob/84cfeaf993982b4245ce7593dcbb6816c5aee8bc/src/coding/hca_decoder.c#L313
+        /*
+            if (subkey) {
+                keycode = keycode * ( ((uint64_t)subkey << 16u) | ((uint16_t)~subkey + 2u) );
+            }
+        */
+
+        if (subkey == null) return { key1: key1, key2: key2 };
+
+        key1 = HCACipher.parseKey(key1);
+        key2 = HCACipher.parseKey(key2);
+        subkey = HCACipher.parseKey(subkey);
+
+        const keydv = new DataView(new ArrayBuffer(8));
+        keydv.setUint32(0, key1, true);
+        keydv.setUint32(4, key2, true);
+
+        const subkeydv = new DataView(new ArrayBuffer(4));
+        subkeydv.setUint16(2, subkey, true);
+        if (subkeydv.getUint16(2) == 0) return { key1: key1, key2: key2 }; //unchanged
+        subkeydv.setUint16(0, ~subkeydv.getUint16(2, true) + 2, true);
+        subkey = subkeydv.getUint32(0, true);
+
+        const mixedkeydv = this.bigUintMultiplyLE(keydv, subkey);
+
+        key1 = mixedkeydv.getUint32(0, true);
+        key2 = mixedkeydv.getUint32(4, true);
+
+        return { key1: key1, key2: key2 };
     }
     setKeys(key1: number, key2: number): HCACipher {
         this.dv1.setUint32(0, key1, true);
@@ -2410,7 +2533,7 @@ class HCACipher {
                 throw new Error("can only accept number/hex string/Uint8Array[4]");
         }
     }
-    constructor (key1?: any, key2?: any) {
+    constructor(key1?: any, key2?: any) {
         this.dv1 = new DataView(this.key1buf);
         this.dv2 = new DataView(this.key2buf);
         if (key1 == null) throw new Error("no keys given. use \"defaultkey\" if you want to use the default key");
@@ -2441,6 +2564,211 @@ class HCACipher {
 }
 
 
+// https://github.com/vgmstream/vgmstream/blob/4eecdada9a03a73af0c7c17f5cd6e08518fd7e3f/src/meta/awb.c#L13
+export class AWBArchive {
+    readonly version: number;
+    readonly offsetSize: number;
+    readonly waveIdAlignment: number;
+    readonly totalSubsongs: number;
+    readonly offsetAlignment: number;
+    readonly subkey: number;
+    readonly hcaFiles: { waveID: number, file: Uint8Array }[];
+
+    static isAWB(file: Uint8Array): boolean {
+        const dv = new DataView(file.buffer, file.byteOffset, file.byteLength);
+        const magic = 0x41465332; // "AFS2" in Uint32BE
+        return dv.getUint32(0, false) == magic;
+    }
+
+    constructor(awb: Uint8Array) {
+        if (!AWBArchive.isAWB(awb)) throw new Error(`not AWB archive`);
+        const dv = new DataView(awb.buffer, awb.byteOffset, awb.byteLength);
+        this.version = dv.getUint8(0x04);
+        this.offsetSize = dv.getUint8(0x05);
+        this.waveIdAlignment = dv.getUint16(0x06, true);
+        this.totalSubsongs = dv.getInt32(0x08, true);
+        this.offsetAlignment = dv.getUint16(0x0c, true);
+        this.subkey = dv.getUint16(0x0e, true);
+
+        let ftell = 0x10;
+
+        this.hcaFiles = Array.from({ length: this.totalSubsongs }, () => {
+            const offset = ftell;
+            ftell += this.waveIdAlignment;
+            return { waveID: dv.getUint16(offset, true) };
+        }).map((o) => {
+            const offset = ftell;
+            ftell += this.offsetSize * 2;
+            switch (this.offsetSize) {
+                case 0x04:
+                    return {
+                        waveID: o.waveID,
+                        offset: dv.getUint32(offset, true),
+                        next: dv.getUint32(offset + this.offsetSize, true),
+                    }
+                case 0x02:
+                    return {
+                        waveID: o.waveID,
+                        offset: dv.getUint16(offset, true),
+                        next: dv.getUint16(offset + this.offsetSize, true),
+                    }
+                default:
+                    throw new Error(`AWB: unknown offset size`);
+            }
+        }).map((o) => {
+            // offset are absolute but sometimes misaligned (specially first that just points to offset table end)
+            o.offset += (o.offset % this.offsetAlignment) ?
+                this.offsetAlignment - (o.offset % this.offsetAlignment) : 0;
+            o.next += (o.next % this.offsetAlignment) && o.next < awb.byteLength ?
+                this.offsetAlignment - (o.next % this.offsetAlignment) : 0;
+            return { waveID: o.waveID, file: awb.subarray(o.offset, o.next) };
+        });
+    }
+}
+
+
+const suspendAudioCtxIfUnlocked = async (audioCtx: AudioContext): Promise<boolean> => {
+    // suspend audio context for now
+    // in apple webkit it's already suspended & calling suspend yet again will block
+    switch (audioCtx.state) {
+        case "running":
+            await audioCtx.suspend();
+            return true;
+        case "suspended":
+            console.warn(`audio context for sampleRate=${audioCtx.sampleRate} is suspended/locked,`
+                + ` which can only be resumed/unlocked by UI event.`);
+            return false;
+        default:
+            throw new Error(`audio context is neither running nor suspended`);
+    }
+}
+
+// WebAudio-based loop player
+export class HCAWebAudioLoopPlayer {
+    get unlocked(): boolean {
+        return this._unlocked;
+    }
+    private _unlocked: boolean;
+
+    private bufSrcStarted = false;
+    private closed = false;
+
+    playInBackground = false; // FIXME
+    private requestedToPlay = false;
+
+    private readonly audioCtx: AudioContext;
+    private readonly info: HCAInfo;
+    private readonly bufSrc: AudioBufferSourceNode;
+    private readonly gainNode: GainNode;
+
+    get volume(): number {
+        return this.gainNode.gain.value;
+    }
+    set volume(val: number) {
+        if (isNaN(val)) return;
+        if (val > 1.0) val = 1.0;
+        if (val < 0) val = 0;
+        this.gainNode.gain.value = val;
+    }
+
+    private readonly visibilityChangeListener = (): void => {
+        switch (document.visibilityState) {
+            case 'visible':
+                if (this.requestedToPlay) {
+                    this._play();
+                }
+                break;
+            case 'hidden':
+            default:
+                if (!this.playInBackground) {
+                    this._pause();
+                }
+        }
+    }
+
+    private constructor(info: HCAInfo, bufSrc: AudioBufferSourceNode, audioCtx: AudioContext, unlocked: boolean,
+        gainNode: GainNode, volume: number) {
+        this.info = info;
+        this.bufSrc = bufSrc;
+        this.audioCtx = audioCtx;
+        this._unlocked = unlocked;
+        this.gainNode = gainNode;
+        this.volume = volume;
+
+        document.addEventListener('visibilitychange', this.visibilityChangeListener);
+    }
+    static async create(decrypted: Uint8Array, worker: HCAWorker, volume = 100): Promise<HCAWebAudioLoopPlayer> {
+        const info = new HCAInfo(decrypted);
+        if (info.cipher != 0) throw new Error("only decrypted hca is accepted");
+
+        const audioCtx = new AudioContext({
+            sampleRate: info.format.samplingRate,
+        });
+        const wav = await worker.decode(decrypted, 16); // first
+
+        const unlocked = await suspendAudioCtxIfUnlocked(audioCtx);
+
+        const buffer = await audioCtx.decodeAudioData(wav.buffer);
+
+        const bufSrc = audioCtx.createBufferSource();
+        bufSrc.buffer = buffer;
+        if (info.loop != null && info.loop.end > info.loop.start) {
+            bufSrc.loopStart = info.loopStartTime;
+            bufSrc.loopEnd = info.loopEndTime;
+            bufSrc.loop = true;
+        }
+
+        const gainNode = audioCtx.createGain();
+        bufSrc.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+
+        return new HCAWebAudioLoopPlayer(info, bufSrc, audioCtx, unlocked, gainNode, volume);
+    }
+
+    // not supposed to be used directly
+    private _play(): void {
+        if (this.audioCtx.state !== "running") this.audioCtx.resume();
+        if (!this.bufSrcStarted) {
+            this.bufSrc.start();
+            this.bufSrcStarted = true;
+        }
+        // mark as unlocked
+        if (!this._unlocked) {
+            this._unlocked = true;
+            console.warn(`audio context for sampleRate=${this.audioCtx.sampleRate} is now resumed/unlocked`);
+        }
+    }
+    private _pause(): void {
+        if (this.audioCtx.state !== "running") return;
+        this.audioCtx.suspend();
+    }
+
+    play(): void {
+        this.requestedToPlay = true;
+        this._play();
+    }
+    pause(): void {
+        this.requestedToPlay = false;
+        this._pause();
+    }
+    async stop(): Promise<void> {
+        if (!this._unlocked) throw new Error("audio context is not unlocked, cannot stop and destroy");
+        if (this.closed) return;
+
+        try {
+            document.removeEventListener('visibilitychange', this.visibilityChangeListener);
+        } catch (e) {
+            console.error(e);
+        }
+
+        this.requestedToPlay = false;
+        this.bufSrc.disconnect();
+        await this.audioCtx.close();
+        this.closed = true;
+    }
+}
+
+
 // Web Worker / AudioWorklet support
 
 // AudioWorkletProcessor types declaration
@@ -2455,7 +2783,7 @@ interface AudioWorkletProcessor {
 }
 declare var AudioWorkletProcessor: {
     prototype: AudioWorkletProcessor;
-    new (options?: AudioWorkletNodeOptions): AudioWorkletProcessor;
+    new(options?: AudioWorkletNodeOptions): AudioWorkletProcessor;
 };
 // ref: https://chromium.googlesource.com/devtools/devtools-frontend/+/f18c0ac2f735bd0b1385398c7e52b8ba01a5d796/node_modules/typescript/lib/lib.dom.d.ts
 interface AudioParamDescriptor {
@@ -2490,22 +2818,21 @@ class HCATransTypedArray {
         if (type != null && type.converted) return (arg as HCATransTypedArray).array;
         else return arg;
     }
-    private static getType(arg: any): {type: string, converted: boolean} | undefined {
+    private static getType(arg: any): { type: string, converted: boolean } | undefined {
         if (arg == null || typeof arg !== "object") return undefined;
-        else if (arg instanceof Int8Array)    return {converted: false, type: "Int8"};
-        else if (arg instanceof Int16Array)   return {converted: false, type: "Int16"};
-        else if (arg instanceof Int32Array)   return {converted: false, type: "Int32"};
-        else if (arg instanceof Uint8Array)   return {converted: false, type: "Uint8"};
-        else if (arg instanceof Uint16Array)  return {converted: false, type: "Uint16"};
-        else if (arg instanceof Uint32Array)  return {converted: false, type: "Uint32"};
-        else if (arg instanceof Float32Array) return {converted: false, type: "Float32"};
-        else if (arg instanceof Float64Array) return {converted: false, type: "Float64"};
-        else if (arg.buffer instanceof ArrayBuffer && typeof arg.type === "string") return {converted: true, type: arg.type};
+        else if (arg instanceof Int8Array) return { converted: false, type: "Int8" };
+        else if (arg instanceof Int16Array) return { converted: false, type: "Int16" };
+        else if (arg instanceof Int32Array) return { converted: false, type: "Int32" };
+        else if (arg instanceof Uint8Array) return { converted: false, type: "Uint8" };
+        else if (arg instanceof Uint16Array) return { converted: false, type: "Uint16" };
+        else if (arg instanceof Uint32Array) return { converted: false, type: "Uint32" };
+        else if (arg instanceof Float32Array) return { converted: false, type: "Float32" };
+        else if (arg instanceof Float64Array) return { converted: false, type: "Float64" };
+        else if (arg.buffer instanceof ArrayBuffer && typeof arg.type === "string") return { converted: true, type: arg.type };
         else return undefined;
     }
-    constructor (ta: Int8Array|Int16Array|Int32Array|Uint8Array|Uint16Array|Uint32Array|Float32Array|Float64Array,
-        transferList: ArrayBuffer[])
-    {
+    constructor(ta: Int8Array | Int16Array | Int32Array | Uint8Array | Uint16Array | Uint32Array | Float32Array | Float64Array,
+        transferList: ArrayBuffer[]) {
         const type = HCATransTypedArray.getType(ta);
         if (type != null) this.type = type.type;
         else throw new Error("unexpected type");
@@ -2514,14 +2841,14 @@ class HCATransTypedArray {
         this.length = ta.length;
         if (!transferList.find((val: ArrayBuffer) => val === this.buffer)) transferList.push(this.buffer);
     }
-    get array(): Int8Array|Int16Array|Int32Array|Uint8Array|Uint16Array|Uint32Array|Float32Array|Float64Array {
+    get array(): Int8Array | Int16Array | Int32Array | Uint8Array | Uint16Array | Uint32Array | Float32Array | Float64Array {
         switch (this.type) {
-            case "Int8":    return new Int8Array(this.buffer, this.byteOffset, this.length);
-            case "Int16":   return new Int16Array(this.buffer, this.byteOffset, this.length);
-            case "Int32":   return new Int32Array(this.buffer, this.byteOffset, this.length);
-            case "Uint8":   return new Uint8Array(this.buffer, this.byteOffset, this.length);
-            case "Uint16":  return new Uint16Array(this.buffer, this.byteOffset, this.length);
-            case "Uint32":  return new Uint32Array(this.buffer, this.byteOffset, this.length);
+            case "Int8": return new Int8Array(this.buffer, this.byteOffset, this.length);
+            case "Int16": return new Int16Array(this.buffer, this.byteOffset, this.length);
+            case "Int32": return new Int32Array(this.buffer, this.byteOffset, this.length);
+            case "Uint8": return new Uint8Array(this.buffer, this.byteOffset, this.length);
+            case "Uint16": return new Uint16Array(this.buffer, this.byteOffset, this.length);
+            case "Uint32": return new Uint32Array(this.buffer, this.byteOffset, this.length);
             case "Float32": return new Float32Array(this.buffer, this.byteOffset, this.length);
             case "Float64": return new Float64Array(this.buffer, this.byteOffset, this.length);
         }
@@ -2583,7 +2910,7 @@ class HCATask {
     private _result?: any;
     private _errMsg?: string;
     private readonly _replyArgs: boolean;
-    constructor (origin: string, taskID: number, cmd: string, args: any[] | undefined, replyArgs: boolean, isDummy?: boolean) {
+    constructor(origin: string, taskID: number, cmd: string, args: any[] | undefined, replyArgs: boolean, isDummy?: boolean) {
         this.origin = origin;
         this.taskID = taskID;
         this.cmd = cmd;
@@ -2660,14 +2987,14 @@ class HCATaskQueue {
                 task = await taskHook(task);
             } catch (e) {
                 task.errMsg = `[${this.origin}] error when applying hook `
-                    +`before executing cmd ${task.cmd} from ${task.origin}`;
+                    + `before executing cmd ${task.cmd} from ${task.origin}`;
                 if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
                 task.isDummy = true;
             }
             // send task
             if (task.isDummy) {
                 if (!task.hasErr && !task.hasResult) task.result = null;
-                const ev = new MessageEvent("message", {data: task}); // not actually sending, use a fake reply
+                const ev = new MessageEvent("message", { data: task }); // not actually sending, use a fake reply
                 this.msgHandler(ev); // won't await
             } else {
                 this.sendTask(task);
@@ -2675,10 +3002,9 @@ class HCATaskQueue {
         }
     }
 
-    constructor (origin: string,
+    constructor(origin: string,
         postMessage: (msg: any, transfer: Transferable[]) => void, taskHandler: (task: HCATask) => any | Promise<any>,
-        destroy: () => void | Promise<void>)
-    {
+        destroy: () => void | Promise<void>) {
         this.origin = origin;
         this.postMessage = postMessage;
         this.taskHandler = taskHandler;
@@ -2731,7 +3057,7 @@ class HCATaskQueue {
                 } catch (e) {
                     if (!task.hasErr) task.errMsg = "";
                     task.errMsg += `[${this.origin}] error when applying hook `
-                        +`after executing cmd ${task.cmd} from ${task.origin}`;
+                        + `after executing cmd ${task.cmd} from ${task.origin}`;
                     if (typeof e === "string" || e instanceof Error) task.errMsg += "\n" + e.toString();
                 }
 
@@ -2741,7 +3067,7 @@ class HCATaskQueue {
                 } else if (task.hasResult) {
                     registered.resolve(result);
                 } else throw new Error(`task (origin=${task.origin} taskID=${task.taskID} cmd=${task.cmd}) `
-                    +`has neither error nor result`); // should never happen
+                    + `has neither error nor result`); // should never happen
 
                 // start next task
                 await this.sendNextTask();
@@ -2777,19 +3103,23 @@ class HCATaskQueue {
         }
     }
 
-    async getTransferConfig(): Promise<{transferArgs: boolean, replyArgs: boolean}> {
+    async getTransferConfig(): Promise<{ transferArgs: boolean, replyArgs: boolean }> {
         if (!this._isAlive) throw new Error("dead");
-        return await this.execCmd("nop", [], {result: () => ({
-            transferArgs: this.transferArgs,
-            replyArgs: this.replyArgs
-        })});
+        return await this.execCmd("nop", [], {
+            result: () => ({
+                transferArgs: this.transferArgs,
+                replyArgs: this.replyArgs
+            })
+        });
     }
     async configTransfer(transferArgs: boolean, replyArgs: boolean): Promise<void> {
         if (!this._isAlive) throw new Error("dead");
-        return await this.execCmd("nop", [], {result: () => {
-            this.transferArgs = transferArgs ? true : false;
-            this.replyArgs = replyArgs ? true : false;
-        }});
+        return await this.execCmd("nop", [], {
+            result: () => {
+                this.transferArgs = transferArgs ? true : false;
+                this.replyArgs = replyArgs ? true : false;
+            }
+        });
     }
 
     async execCmd(cmd: string, args: any[], hook?: HCATaskHook): Promise<any> {
@@ -2800,8 +3130,10 @@ class HCATaskQueue {
         const task = new HCATask(this.origin, taskID, cmd, args, this.replyArgs);
         // register callback
         if (this.callbacks[taskID] != null) throw new Error(`taskID=${taskID} is already occupied`);
-        const resultPromise = new Promise((resolve, reject) => this.callbacks[taskID] = {resolve: resolve, reject: reject,
-            hook: hook});
+        const resultPromise = new Promise((resolve, reject) => this.callbacks[taskID] = {
+            resolve: resolve, reject: reject,
+            hook: hook
+        });
         // append to command queue
         this.queue.push(task);
         // start executing tasks
@@ -2810,7 +3142,7 @@ class HCATaskQueue {
         return await resultPromise;
     }
 
-    async execMultiCmd(cmdList: {cmd: string, args: any[], hook?: HCATaskHook}[]): Promise<any[]> {
+    async execMultiCmd(cmdList: { cmd: string, args: any[], hook?: HCATaskHook }[]): Promise<any[]> {
         // the point is to ensure "atomicity" between cmds
         if (!this._isAlive) throw new Error("dead");
         let resultPromises: Promise<any>[] = [];
@@ -2821,8 +3153,10 @@ class HCATaskQueue {
             const task = new HCATask(this.origin, taskID, listItem.cmd, listItem.args, this.replyArgs);
             // register callback
             if (this.callbacks[taskID] != null) throw new Error(`taskID=${taskID} is already occupied`);
-            resultPromises.push(new Promise((resolve, reject) => this.callbacks[taskID] = {resolve: resolve, reject: reject,
-                hook: listItem.hook}));
+            resultPromises.push(new Promise((resolve, reject) => this.callbacks[taskID] = {
+                resolve: resolve, reject: reject,
+                hook: listItem.hook
+            }));
             // append to command queue
             this.queue.push(task);
         }
@@ -2849,17 +3183,313 @@ class HCATaskQueue {
                     console.error(`[${this.origin}] error when trying to forcibly shutdown.`, e);
                 }
                 this._isAlive = false;
-            } else await this.execCmd("nop", [], {result: async () => {
-                await this.destroy();
-                this._isAlive = false;
-            }});
+            } else await this.execCmd("nop", [], {
+                result: async () => {
+                    await this.destroy();
+                    this._isAlive = false;
+                }
+            });
         }
     }
+}
+
+interface HCAFramePlayerProcessorOptions {
+    rawHeader: Uint8Array,
+    pullBlockCount?: number,
 }
 
 if (typeof document === "undefined") {
     if (typeof onmessage === "undefined") {
         // AudioWorklet
+        class HCAFramePlayerContext {
+            isPlaying = false;
+
+            readonly defaultPullBlockCount = 128;
+            pullBlockCount: number;
+
+            frame: HCAFrame;
+
+            failedBlocks: Array<number> = [];
+            lastError?: any;
+            readonly printErrorCountDownFrom = 256;
+            printErrorCountDown = this.printErrorCountDownFrom;
+
+            // if loop header exists, all blocks (up to loop end) are stored in encoded buffer,
+            // otherwise, only 2 * pullBlockCount blocks are stored in encoded buffer
+            encoded: Uint8Array;
+            totalPulledBlockCount = 0;
+            isPulling = false;
+            get isStalling(): boolean {
+                return this._isStalling;
+            }
+            set isStalling(val: boolean) {
+                this._isStalling = val;
+                if (val) this.onceStalled = true;
+            }
+            private _isStalling = false;
+            onceStalled = false;
+
+            // two blocks are stored in decoded buffer
+            decoded: Float32Array[];
+            sampleOffset = 0;
+            lastDecodedBlockIndex = -1;
+
+            constructor(procOpts: HCAFramePlayerProcessorOptions) {
+                this.frame = new HCAFrame(new HCAInfo(procOpts.rawHeader));
+                const info = this.frame.Hca;
+                const hasLoop = info.hasHeader["loop"] ? true : false;
+
+                if (typeof procOpts.pullBlockCount === "number") {
+                    if (isNaN(procOpts.pullBlockCount)) throw new Error();
+                    let pullBlockCount = Math.floor(procOpts.pullBlockCount);
+                    if (pullBlockCount < 2) throw new Error();
+                    this.pullBlockCount = pullBlockCount;
+                } else this.pullBlockCount = this.defaultPullBlockCount;
+                const bufferedBlockCount = hasLoop ? (info.loop.end + 1) : this.pullBlockCount * 2;
+                this.encoded = new Uint8Array(info.blockSize * bufferedBlockCount);
+                this.decoded = Array.from(
+                    { length: info.format.channelCount },
+                    () => new Float32Array(HCAFrame.SamplesPerFrame * 2)
+                );
+            }
+        }
+        class HCAFramePlayer extends AudioWorkletProcessor {
+            private ctx?: HCAFramePlayerContext;
+
+            private unsettled: { resolve: (result?: any) => void, counter: number }[] = [];
+            private readonly waitCountDownFrom = 32;
+
+            private readonly taskQueue: HCATaskQueue;
+
+            constructor(options: AudioWorkletNodeOptions | undefined) {
+                super();
+
+                if (options == null || options.processorOptions == null) throw new Error();
+                this.ctx = new HCAFramePlayerContext(options.processorOptions);
+
+                this.taskQueue = new HCATaskQueue("Background-HCAFramePlayer",
+                    (msg: any, trans: Transferable[]) => this.port.postMessage(msg, trans),
+                    async (task: HCATask) => {
+                        switch (task.cmd) {
+                            case "nop":
+                                return;
+                            case "initialize":
+                                this.ctx = new HCAFramePlayerContext(task.args[0]);
+                                break;
+                            case "reset":
+                                await new Promise((resolve) => {
+                                    delete this.ctx;
+                                    this.unsettled.push({ resolve: resolve, counter: this.waitCountDownFrom });
+                                });
+                                break;
+                            case "pause":
+                            case "resume":
+                                if (this.ctx == null) throw new Error(`not initialized`);
+                                this.ctx.isPlaying = task.cmd === "resume";
+                                if (!this.ctx.isPlaying) await new Promise((resolve) => {
+                                    this.unsettled.push({ resolve: resolve, counter: this.waitCountDownFrom });
+                                });
+                                break;
+                            default:
+                                throw new Error(`unknown cmd ${task.cmd}`);
+                        }
+                    },
+                    () => { this.taskQueue.sendCmd("self-destruct", []); }
+                );
+                this.taskQueue.configTransfer(true, false);
+                this.port.onmessage = (ev: MessageEvent) => this.taskQueue.msgHandler(ev);
+            }
+
+            private handleNewBlocks(ctx: HCAFramePlayerContext, newBlocks: Uint8Array): void {
+                const info = ctx.frame.Hca;
+                const hasLoop = info.hasHeader["loop"] ? true : false;
+                const pullBlockCount = ctx.pullBlockCount;
+                const encoded = ctx.encoded;
+                if (newBlocks.length % info.blockSize != 0) {
+                    throw new Error(`newBlocks.length=${newBlocks.length} should be multiple of blockSize`);
+                }
+                const newBlockCount = newBlocks.length / info.blockSize;
+                const expected = info.blockSize * pullBlockCount;
+                if (hasLoop) {
+                    let encodedOffset = info.blockSize * ctx.totalPulledBlockCount;
+                    if (encodedOffset + newBlocks.length > encoded.length) {
+                        throw new Error(`has loop header, buffer will overflow`);
+                    }
+                    encoded.set(newBlocks, encodedOffset);
+                } else {
+                    if (newBlocks.length != expected) {
+                        throw new Error(`no loop header, newBlocks.length (${newBlocks.length}) != expected (${expected})`);
+                    }
+                    switch (ctx.totalPulledBlockCount % (pullBlockCount * 2)) {
+                        case 0:
+                            encoded.set(newBlocks);
+                            break;
+                        case pullBlockCount:
+                            encoded.set(newBlocks, expected);
+                            break;
+                        default:
+                            throw new Error();
+                    }
+                }
+                ctx.totalPulledBlockCount += newBlockCount;
+                ctx.isPulling = false;
+            }
+
+            private pullNewBlocks(ctx: HCAFramePlayerContext): void {
+                // if ctx passed in had been actually deleted, it won't affect the current using ctx
+                if (ctx.isPulling) return; // already pulling. will be called again if still not enough
+                ctx.isPulling = true;
+                // request to pull & continue decoding
+                this.taskQueue.execCmd("pull", [], {
+                    result: (newBlocks: Uint8Array) => this.handleNewBlocks(ctx, newBlocks),
+                    error: () => { ctx.isPulling = false; },
+                })
+                    .catch((e) => {
+                        console.warn(`pullNewBlocks failed.`, e);
+                    });
+            }
+
+            private writeToDecodedBuffer(frame: HCAFrame, decoded: Float32Array[]): void {
+                const halfSize = HCAFrame.SamplesPerFrame;
+                for (let c = 0; c < frame.Channels.length; c++) {
+                    const firstHalf = decoded[c].subarray(0, halfSize);
+                    const lastHalf = decoded[c].subarray(halfSize, halfSize * 2);
+                    firstHalf.set(lastHalf);
+                    for (let sf = 0, offset = 0; sf < HCAFrame.SubframesPerFrame; sf++) {
+                        lastHalf.set(frame.Channels[c].PcmFloat[sf], offset);
+                        offset += HCAFrame.SamplesPerSubFrame;
+                    }
+                    for (let i = 0; i < lastHalf.length; i++) {
+                        if (lastHalf[i] > 1) lastHalf[i] = 1;
+                        else if (lastHalf[i] < -1) lastHalf[i] = -1;
+                    }
+                }
+            }
+
+            private mapToUnLooped(info: HCAInfo, sampleOffset: number): number {
+                const hasLoop = info.hasHeader["loop"] ? true : false;
+                if (sampleOffset <= info.endAtSample) {
+                    return sampleOffset;
+                } else {
+                    if (hasLoop) {
+                        let offset = (sampleOffset - info.loopStartAtSample) % info.loopSampleCount;
+                        return info.loopStartAtSample + offset;
+                    } else {
+                        return info.endAtSample;
+                    }
+                }
+            }
+
+            process(inputs: Float32Array[][], outputs: Float32Array[][], parameters: AudioWorkletNodeOptions) {
+                if (this.ctx == null || !this.ctx.isPlaying) {
+                    // workaround the "residue" burst noise issue in Chrome
+                    const unsettled = this.unsettled.shift();
+                    if (unsettled != null) {
+                        if (--unsettled.counter > 0) this.unsettled.unshift(unsettled);
+                        else try {
+                            unsettled.resolve();
+                        } catch (e) {
+                            console.error(`error when settling promise of "reset" or "setPlaying" cmd`);
+                        }
+                    }
+                    return true; // wait for new source or resume
+                }
+
+                if (this.ctx.failedBlocks.length > 0) {
+                    if (this.ctx.failedBlocks.length >= 64 || --this.ctx.printErrorCountDown <= 0) {
+                        console.error(`error decoding following blocks`, this.ctx.failedBlocks, this.ctx.lastError);
+                        this.ctx.failedBlocks = []; this.ctx.lastError = undefined;
+                        this.ctx.printErrorCountDown = this.ctx.printErrorCountDownFrom;
+                    }
+                }
+
+                const output = outputs[0];
+                const renderQuantumSize = output[0].length;
+                const samplesPerBlock = HCAFrame.SamplesPerFrame;
+                // no more than one block will be decoded each time this function being called,
+                // therefore one block must cover the whole renderQuantumSize
+                if (samplesPerBlock < renderQuantumSize)
+                    throw new Error("render quantum requires more sample than a full block");
+                const info = this.ctx.frame.Hca;
+                const hasLoop = info.hasHeader["loop"] ? true : false;
+                const encoded = this.ctx.encoded;
+                const decoded = this.ctx.decoded;
+                // skip droppedHeader
+                if (this.ctx.sampleOffset < info.format.droppedHeader) {
+                    this.ctx.sampleOffset = info.format.droppedHeader;
+                }
+                if (this.ctx.sampleOffset >= info.endAtSample) {
+                    if (hasLoop) {
+                        // rewind back if beyond loop end
+                        this.ctx.sampleOffset = this.mapToUnLooped(info, this.ctx.sampleOffset);
+                    } else {
+                        // nothing more to play
+                        this.taskQueue.sendCmd("end", []); // not waiting for result
+                        delete this.ctx; // avoid sending "end" cmd for more than one time
+                        return true;
+                    }
+                }
+                // decode block & pull new block (if needed)
+                const mappedStartOffset = this.mapToUnLooped(info, this.ctx.sampleOffset);
+                const mappedEndOffset = this.mapToUnLooped(info, this.ctx.sampleOffset + renderQuantumSize);
+                const inBlockStartOffset = mappedStartOffset % samplesPerBlock;
+                const inBlockEndOffset = mappedEndOffset % samplesPerBlock;
+                const startBlockIndex = (mappedStartOffset - inBlockStartOffset) / samplesPerBlock;
+                const endBlockIndex = (mappedEndOffset - inBlockEndOffset) / samplesPerBlock;
+                if (endBlockIndex != this.ctx.lastDecodedBlockIndex) {
+                    if (endBlockIndex < this.ctx.totalPulledBlockCount) {
+                        // block is available for decoding
+                        this.ctx.isStalling = false;
+                        let start = info.blockSize * (hasLoop
+                            ? endBlockIndex
+                            : endBlockIndex % (this.ctx.pullBlockCount * 2));
+                        let end = start + info.blockSize;
+                        if (end > encoded.length) throw new Error("block end offset exceeds buffer size");
+                        try {
+                            HCA.decodeBlock(this.ctx.frame, encoded.subarray(start, end));
+                        } catch (e) {
+                            this.ctx.failedBlocks.push(endBlockIndex);
+                            this.ctx.lastError = e;
+                            this.ctx.frame.Channels.forEach((c) => { c.PcmFloat.forEach((sf) => sf.fill(0)) });
+                        }
+                        this.writeToDecodedBuffer(this.ctx.frame, this.ctx.decoded);
+                        this.ctx.lastDecodedBlockIndex = endBlockIndex;
+                        if (this.ctx.totalPulledBlockCount < (hasLoop ? info.loop.end : info.format.blockCount)) {
+                            // pull blocks in advance
+                            let availableBlockCount = hasLoop && this.ctx.totalPulledBlockCount >= info.loop.end + 1
+                                ? "all_pulled"
+                                : this.ctx.totalPulledBlockCount - (this.ctx.lastDecodedBlockIndex + 1);
+                            if (typeof availableBlockCount === 'number' && availableBlockCount < this.ctx.pullBlockCount) {
+                                this.pullNewBlocks(this.ctx);
+                            }
+                        }
+                    } else {
+                        // block is unavailable
+                        if (!this.ctx.isStalling && this.ctx.onceStalled) {
+                            // print error about stalling
+                            console.warn(`[HCAFramePlayer] waiting until block ${endBlockIndex} become available...`);
+                        }
+                        this.ctx.isStalling = true;
+                        this.pullNewBlocks(this.ctx);
+                        return true;
+                    }
+                }
+                // copy decoded data
+                if (output.length != info.format.channelCount) throw new Error("channel count mismatch");
+                const inBufferStartOffset = (endBlockIndex != startBlockIndex ? 0 : samplesPerBlock) + inBlockStartOffset;
+                const inBufferEndOffset = samplesPerBlock + inBlockEndOffset;
+                const inBufferSrcSize = inBufferEndOffset - inBufferStartOffset;
+                if (inBufferSrcSize <= 0) throw new Error("size in decoded buffer should be positive");
+                const copySize = Math.min(inBufferSrcSize, renderQuantumSize);
+                for (let channel = 0; channel < output.length; channel++) {
+                    let src = decoded[channel].subarray(inBufferStartOffset, inBufferStartOffset + copySize);
+                    output[channel].set(src);
+                }
+                this.ctx.sampleOffset += copySize;
+                return true;
+            }
+        }
+        registerProcessor("hca-frame-player", HCAFramePlayer);
     } else {
         // Web Worker
         const taskQueue = new HCATaskQueue("Background-HCAWorker",
@@ -2872,6 +3502,8 @@ if (typeof document === "undefined") {
                         return HCAInfo.fixHeaderChecksum.apply(HCAInfo, task.args);
                     case "fixChecksum":
                         return HCA.fixChecksum.apply(HCA, task.args);
+                    case "findKey":
+                        return HCA.findKey.apply(HCA, task.args);
                     case "decrypt":
                         return HCA.decrypt.apply(HCA, task.args);
                     case "encrypt":
@@ -2884,9 +3516,493 @@ if (typeof document === "undefined") {
                         throw new Error(`unknown cmd ${task.cmd}`);
                 }
             },
-            () => {taskQueue.sendCmd("self-destruct", []);}
+            () => { taskQueue.sendCmd("self-destruct", []); }
         );
         onmessage = (ev: MessageEvent) => taskQueue.msgHandler(ev);
+    }
+}
+
+// create & control audio worklet
+class HCAAudioWorkletHCAPlayer {
+    private static readonly feedByteMax = 32768;
+
+    get isAlive(): boolean {
+        return this.taskQueue.isAlive;
+    }
+    get initialized(): boolean {
+        return this._initialized;
+    }
+    get unlocked(): boolean {
+        return this._unlocked;
+    }
+    private _initialized = true; // initially there must be something to play
+    private _unlocked: boolean;
+    private isPlaying = false;
+
+    playInBackground = false; // FIXME
+    private requestedToPlay = false;
+
+    private source?: Uint8Array | ReadableStreamDefaultReader<Uint8Array>;
+    private srcBuf?: Uint8Array;
+    private info: HCAInfo;
+    private hasLoop: boolean;
+    private cipher?: HCACipher;
+
+    private verifyCsum = false;
+    get blockChecksumVerification() {
+        return this.verifyCsum;
+    }
+    set blockChecksumVerification(val: boolean) {
+        if (typeof val !== "boolean") throw new Error();
+        this.verifyCsum = val;
+    }
+
+    private readonly feedBlockCount: number;
+    private get feedSize(): number {
+        return this.info.blockSize * this.feedBlockCount;
+    }
+    private totalFedBlockCount = 0;
+    private get remainingBlockCount(): number {
+        let total = this.hasLoop ? this.info.loop.end + 1 : this.info.format.blockCount;
+        let remaining = total - this.totalFedBlockCount;
+        if (remaining <= 0) throw new Error();
+        return remaining;
+    }
+
+    private get downloadBufferSize(): number {
+        const bytesPerSec = this.info.kbps * 1000 / 8;
+        return bytesPerSec * 4;
+    }
+
+    private readonly selfUrl: URL;
+    readonly sampleRate: number;
+    readonly channelCount: number;
+    private readonly audioCtx: AudioContext;
+    private readonly hcaPlayerNode: AudioWorkletNode;
+    private readonly gainNode: GainNode;
+
+    get volume(): number {
+        return this.gainNode.gain.value;
+    }
+    set volume(val: number) {
+        if (isNaN(val)) return;
+        if (val > 1.0) val = 1.0;
+        if (val < 0) val = 0;
+        this.gainNode.gain.value = val;
+    }
+
+    private readonly taskQueue: HCATaskQueue;
+
+    private async taskHandler(task: HCATask): Promise<Uint8Array | undefined> {
+        switch (task.cmd) {
+            case "nop":
+                return;
+            case "self-destruct": // doesn't seem to have a chance to be called
+                console.error(`HCAFramePlayer requested to self-destruct`);
+                await this.taskQueue.shutdown(true);
+                return;
+            case "end":
+                await this.stop();
+                return; // actually not sending back reply
+            case "pull":
+                if (this.source == null) throw new Error(`nothing to feed`); // should never happen
+                let blockCount = Math.min(this.feedBlockCount, this.remainingBlockCount);
+                let size = this.info.blockSize * blockCount;
+                let newBlocks: Uint8Array;
+                if (this.source instanceof Uint8Array) {
+                    // whole HCA mode
+                    let start = this.info.dataOffset + this.info.blockSize * this.totalFedBlockCount;
+                    let end = start + size;
+                    newBlocks = this.source.subarray(start, end);
+                    //} else if (this.source instanceof ReadableStreamDefaultReader) {
+                    // commented out because Firefox throws "ReferenceError: ReadableStreamDefaultReader is not defined"
+                } else {
+                    // URL mode
+                    if (this.srcBuf == null) throw new Error("srcBuf is undefined");
+                    let maxDownlaodSize = this.info.blockSize * this.remainingBlockCount;
+                    let downloadSize = Math.max(this.downloadBufferSize, size);
+                    downloadSize = Math.min(downloadSize, maxDownlaodSize);
+                    let remaining = downloadSize - this.srcBuf.length;
+                    if (remaining > 0) {
+                        // FIXME connection loss is not handled/recovered
+                        this.srcBuf = await HCAAudioWorkletHCAPlayer.readAndAppend(this.source, this.srcBuf, remaining);
+                    }
+                    if (this.srcBuf.length < size) throw new Error("srcBuf still smaller than expected");
+                    newBlocks = this.srcBuf.subarray(0, size);
+                    this.srcBuf = this.srcBuf.slice(size);
+                }
+                for (let i = 0, start = 0; i < blockCount; i++, start += this.info.blockSize) {
+                    let block = newBlocks.subarray(start, start + this.info.blockSize);
+                    // verify checksum (if enabled)
+                    // will throw & stop playing on mismatch!
+                    if (this.verifyCsum) HCACrc16.verify(block, this.info.blockSize - 2);
+                    // decrypt (if encrypted)
+                    if (this.cipher != null) this.cipher.mask(block, 0, this.info.blockSize - 2);
+                    // fix checksum
+                    HCACrc16.fix(block, this.info.blockSize - 2);
+                }
+                if (this.hasLoop) {
+                    // just copy, no need to enlarge
+                    newBlocks = newBlocks.slice();
+                } else {
+                    // enlarge & copy
+                    let data = newBlocks;
+                    newBlocks = new Uint8Array(this.feedSize);
+                    newBlocks.set(data);
+                }
+                this.totalFedBlockCount += blockCount;
+                return newBlocks;
+            default:
+                throw new Error(`unknown cmd "${task.cmd}"`);
+        }
+    }
+
+    static async create(selfUrl: URL, source: Uint8Array | URL, key1?: any, key2?: any, subkey?: any): Promise<HCAAudioWorkletHCAPlayer> {
+        if (!(selfUrl instanceof URL)) throw new Error();
+        if (!(source instanceof Uint8Array || source instanceof URL)) throw new Error();
+
+        let actualSource: Uint8Array | ReadableStreamDefaultReader<Uint8Array>;
+        let info: HCAInfo;
+        let srcBuf: Uint8Array | undefined = undefined;
+        if (source instanceof Uint8Array) {
+            actualSource = source.slice(0);
+            info = new HCAInfo(actualSource);
+        } else if (source instanceof URL) {
+            const fetched = await this.getHCAInfoFromURL(source);
+            actualSource = fetched.reader;
+            info = fetched.info;
+            srcBuf = fetched.buffer;
+        } else throw Error();
+        let feedByteMax = Math.floor(this.feedByteMax);
+        if (feedByteMax < info.blockSize) throw new Error();
+        feedByteMax -= feedByteMax % info.blockSize;
+        const feedBlockCount = feedByteMax / info.blockSize;
+        // initialize cipher
+        const cipher = this.getCipher(info, key1, key2, subkey);
+        // create audio context
+        const audioCtx = new AudioContext({
+            //latencyHint: "playback", // FIXME "playback" seems to glitch if switched to background in Android
+            sampleRate: info.format.samplingRate,
+        });
+        // create audio worklet node (not yet connected)
+        await audioCtx.audioWorklet.addModule(selfUrl);
+        const options: AudioWorkletNodeOptions = {
+            numberOfInputs: 0,
+            numberOfOutputs: 1,
+            outputChannelCount: [info.format.channelCount],
+            processorOptions: {
+                rawHeader: info.getRawHeader(),
+                pullBlockCount: feedBlockCount,
+            },
+        };
+        const hcaPlayerNode = new AudioWorkletNode(audioCtx, "hca-frame-player", options);
+        // create gain node
+        const gainNode = audioCtx.createGain();
+        const unlocked = await suspendAudioCtxIfUnlocked(audioCtx);
+        // create controller object
+        return new HCAAudioWorkletHCAPlayer(selfUrl, audioCtx, unlocked, hcaPlayerNode, gainNode, feedBlockCount,
+            info, actualSource, srcBuf, cipher);
+    }
+
+    private async _terminate(): Promise<void> {
+        // I didn't find terminate() for AudioWorklet so I made one
+        try {
+            this.hcaPlayerNode.port.close();
+        } catch (e) {
+            console.error(`error trying to close message port`, e);
+        }
+        try {
+            this.hcaPlayerNode.disconnect();
+        } catch (e) {
+            console.error(`error trying to disconnect hcaPlayerNode`, e);
+        }
+        try {
+            this.gainNode.disconnect();
+        } catch (e) {
+            console.error(`error trying to disconnect gainNode`, e);
+        }
+        try {
+            await this.audioCtx.close();
+        } catch (e) {
+            console.error(`error trying to close audio context`, e);
+        }
+    }
+
+    private readonly visibilityChangeListener = (): void => {
+        switch (document.visibilityState) {
+            case 'visible':
+                if (this.requestedToPlay) {
+                    this._play();
+                }
+                break;
+            case 'hidden':
+            default:
+                if (!this.playInBackground) {
+                    this._pause();
+                }
+        }
+    }
+
+    private constructor(selfUrl: URL, audioCtx: AudioContext, unlocked: boolean,
+        hcaPlayerNode: AudioWorkletNode, gainNode: GainNode, feedBlockCount: number,
+        info: HCAInfo, source: Uint8Array | ReadableStreamDefaultReader<Uint8Array>, srcBuf?: Uint8Array, cipher?: HCACipher) {
+        this.selfUrl = selfUrl;
+        this.audioCtx = audioCtx;
+        this._unlocked = unlocked;
+        this.taskQueue = new HCATaskQueue("Main-HCAAudioWorkletHCAPlayer",
+            (msg: any, trans: Transferable[]) => hcaPlayerNode.port.postMessage(msg, trans),
+            (task: HCATask) => this.taskHandler(task),
+            async () => await this._terminate());
+        hcaPlayerNode.port.onmessage = (ev) => this.taskQueue.msgHandler(ev);
+        hcaPlayerNode.port.onmessageerror = (ev) => this.taskQueue.errHandler(ev);
+        hcaPlayerNode.onprocessorerror = (ev) => this.taskQueue.errHandler(ev);
+        this.hcaPlayerNode = hcaPlayerNode;
+        this.gainNode = gainNode;
+        this.feedBlockCount = feedBlockCount;
+        this.info = info;
+        this.source = source;
+        this.cipher = cipher;
+        this.srcBuf = srcBuf;
+        this.sampleRate = info.format.samplingRate;
+        this.channelCount = info.format.channelCount;
+        this.hasLoop = info.hasHeader["loop"] ? true : false;
+
+        document.addEventListener('visibilitychange', this.visibilityChangeListener);
+    }
+
+    private static getCipher(info: HCAInfo, key1?: any, key2?: any, subkey?: any): HCACipher | undefined {
+        // handle subkey
+        let mixed = HCACipher.mixWithSubkey(key1, key2, subkey);
+        key1 = mixed.key1;
+        key2 = mixed.key2;
+        switch (info.cipher) {
+            case 0:
+                // not encrypted
+                return undefined;
+            case 1:
+                // encrypted with "no key"
+                return new HCACipher("none"); // ignore given keys
+            case 0x38:
+                // encrypted with keys - will yield incorrect waveform if incorrect keys are given!
+                return new HCACipher(key1, key2);
+            default:
+                throw new Error("unknown ciph.type");
+        }
+    }
+
+    private static async readAndAppend(reader: ReadableStreamDefaultReader<Uint8Array>,
+        data: Uint8Array, minCount: number): Promise<Uint8Array> {
+        if (minCount < 0) throw new Error();
+        const desired = data.length + minCount;
+        let newData = new Uint8Array(desired);
+        newData.set(data);
+        for (let offset = data.length; offset < desired;) {
+            const res = await reader.read();
+            if (res.done) throw new Error(`unexpected stream end. `
+                + `it is possible that the download has been canceled (by later setSource), or the file data is incomplete`);
+            const bytes = res.value;
+            if (bytes.length > 0) {
+                const required = offset + bytes.length;
+                if (required > newData.length) {
+                    const existing = newData;
+                    newData = new Uint8Array(required);
+                    newData.set(existing);
+                }
+                newData.set(bytes, offset);
+                offset += bytes.length;
+            }
+        }
+        return newData;
+    }
+
+    private static async getHCAInfoFromURL(url: URL): Promise<{
+        reader: ReadableStreamDefaultReader<Uint8Array>,
+        info: HCAInfo,
+        buffer: Uint8Array,
+    }> {
+        // FIXME send HTTP Range request to avoid blocking later requests (especially in Firefox)
+        const resp = await fetch(url.href);
+        if (resp.status != 200) throw new Error(`status ${resp.status}`);
+        if (resp.body == null) throw new Error("response has no body");
+        const reader = resp.body.getReader();
+        let buffer = await this.readAndAppend(reader, new Uint8Array(0), 8);
+        const dataOffset = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength).getUint16(6);
+        const remaining = dataOffset - buffer.length;
+        if (remaining > 0) {
+            buffer = await this.readAndAppend(reader, buffer, remaining);
+        }
+        return {
+            reader: reader,
+            info: new HCAInfo(buffer),
+            buffer: buffer.slice(dataOffset),
+        };
+    }
+
+    async setSource(source: Uint8Array | URL, key1?: any, key2?: any, subkey?: any): Promise<void> {
+        let newInfo: HCAInfo;
+        let newSource: Uint8Array | ReadableStreamDefaultReader<Uint8Array>;
+        let newBuffer: Uint8Array | undefined = undefined;
+        const initializeCmdItem = {
+            cmd: "initialize", args: [null], hook: {
+                task: async (task: HCATask) => {
+                    if (!this.isAlive) throw new Error("dead");
+
+                    const oldSource = this.source;
+                    //if (oldSource instanceof ReadableStreamDefaultReader) {
+                    if (oldSource != null && !(oldSource instanceof Uint8Array)) {
+                        try {
+                            await oldSource.cancel(); // stop downloading from previous URL
+                            // FIXME Firefox doesn't seem to abort previous download
+                        } catch (e) {
+                            console.error(`error when cancelling previous download.`, e);
+                        }
+                    }
+
+                    if (source instanceof Uint8Array) {
+                        newSource = source.slice(0);
+                        newInfo = new HCAInfo(newSource);
+                    } else if (source instanceof URL) {
+                        const result = await HCAAudioWorkletHCAPlayer.getHCAInfoFromURL(source);
+                        newSource = result.reader;
+                        newInfo = result.info;
+                        newBuffer = result.buffer;
+                    } else throw new Error("invalid source");
+
+                    // sample rate and channel count is immutable,
+                    // therefore, the only way to change them is to recreate a new instance.
+                    // however, there is a memleak bug in Chromium, that:
+                    // (no-longer-used) audio worklet node(s) won't be recycled:
+                    // https://bugs.chromium.org/p/chromium/issues/detail?id=1298955
+                    if (newInfo.format.samplingRate != this.sampleRate)
+                        throw new Error("sample rate mismatch");
+                    if (newInfo.format.channelCount != this.channelCount)
+                        throw new Error("channel count mismatch");
+
+                    await this._resume(); // resume it, so that cmd can then be executed
+
+                    const newProcOpts = {
+                        rawHeader: newInfo.getRawHeader(),
+                        pullBlockCount: this.feedBlockCount,
+                    };
+                    return new HCATask(task.origin, task.taskID, task.cmd, [newProcOpts], false);
+                }, result: async () => {
+                    await this._suspend(); // initialized, but it's paused, until being requested to start/play (resume)
+                    this.totalFedBlockCount = 0;
+                    this.cipher = HCAAudioWorkletHCAPlayer.getCipher(newInfo, key1, key2, subkey);
+                    this.info = newInfo;
+                    this.source = newSource;
+                    this.srcBuf = newBuffer;
+                    this.hasLoop = newInfo.hasHeader["loop"] ? true : false;
+                    this._initialized = true; // again we now have something to play
+                }
+            }
+        }
+        await this.taskQueue.execMultiCmd([this.stopCmdItem, initializeCmdItem]); // ensure atomicity
+    }
+
+    // not supposed to be used directly
+    private async _resume(): Promise<void> {
+        if (!this.isAlive) throw new Error("dead");
+        if (this.isPlaying) return;
+        await this.audioCtx.resume();
+        this.hcaPlayerNode.connect(this.gainNode);
+        this.gainNode.connect(this.audioCtx.destination);
+        this.isPlaying = true;
+        // mark as unlocked
+        if (!this._unlocked) {
+            this._unlocked = true;
+            console.warn(`audio context for sampleRate=${this.audioCtx.sampleRate} is now resumed/unlocked`);
+        }
+    }
+    private async _suspend(): Promise<void> {
+        if (!this.isAlive) throw new Error("dead");
+        if (!this.isPlaying) return;
+        this.hcaPlayerNode.disconnect();
+        this.gainNode.disconnect();
+        await this.audioCtx.suspend();
+        this.isPlaying = false;
+    }
+    private async _pause(): Promise<void> {
+        await this.setPlaying(false);
+    }
+    private async _play(): Promise<void> {
+        // in apple webkit, audio context is suspended/locked initially,
+        // (other browsers like Firefox may have similar but less strict restrictions)
+        // to resume/unlock it, first resume() call must be triggered by from UI event,
+        // which must not be after await
+        await this.setPlaying(true);
+    }
+    private readonly stopCmdItem = {
+        // exec "reset" cmd first, in order to avoid "residue" burst noise to be played in the future (observed in Chrome)
+        cmd: "reset", args: [], hook: {
+            task: async (task: HCATask) => {
+                if (!this.isAlive) throw new Error("dead");
+                if (!this.isPlaying) await this._resume();
+                return task;
+            },
+            result: async () => {
+                await this._suspend(); // can now suspend
+                this._initialized = false; // now we have nothing to play until next setSource
+                if (this.source != null && !(this.source instanceof Uint8Array)) {
+                    await this.source.cancel();
+                    delete this.source;
+                }
+            },
+        }
+    }
+
+    // wraped to ensure atomicity
+    private async setPlaying(toPlay: boolean): Promise<void> {
+        // simlilar to stopCmdItem above, send "pause" cmd to avoid "residue" burst noise
+        await this.taskQueue.execCmd(toPlay ? "resume" : "pause", [], {
+            task: async (task: HCATask) => {
+                if (!this.isAlive) throw new Error("dead");
+                if (this.isPlaying) {
+                    if (toPlay) task.isDummy = true; // already resumed, not sending cmd
+                    // else should still keep playing until "pause" cmd returns
+                } else {
+                    if (toPlay) {
+                        if (!this._initialized) throw new Error(`not initialized but still attempt to resume`);
+                        await this._resume();
+                    }
+                    else task.isDummy = true; // already paused, not sending cmd
+                }
+                return task;
+            },
+            result: async () => {
+                if (toPlay) await this._resume();
+                else await this._suspend();
+            }
+        });
+    }
+    async pause(): Promise<void> {
+        this.requestedToPlay = false;
+        await this._pause();
+    }
+    async play(): Promise<void> {
+        this.requestedToPlay = true;
+        await this._play();
+    }
+    async stop(): Promise<void> {
+        // can unlock the locked audio context as well because it's resumed firstly before finally suspended
+        this.requestedToPlay = false;
+        const item = this.stopCmdItem;
+        await this.taskQueue.execCmd(item.cmd, item.args, item.hook);
+    }
+
+    async shutdown(forcibly = false): Promise<void> {
+        if (!this.isAlive) {
+            console.error(`already shutdown`);
+            return;
+        }
+
+        try {
+            document.removeEventListener('visibilitychange', this.visibilityChangeListener);
+        } catch (e) {
+            console.error(e);
+        }
+
+        await this.taskQueue.shutdown(forcibly);
     }
 }
 
@@ -2898,9 +4014,11 @@ export class HCAWorker {
     private readonly selfUrl: URL;
     private readonly taskQueue: HCATaskQueue;
     private hcaWorker: Worker;
+    /*private*/ awHcaPlayer?: HCAAudioWorkletHCAPlayer; // FIXME should be private
     private lastTick = 0;
     async shutdown(forcibly = false): Promise<void> {
         if (this.taskQueue.isAlive) await this.taskQueue.shutdown(forcibly);
+        if (this.awHcaPlayer != null && this.awHcaPlayer.isAlive) await this.awHcaPlayer.shutdown(forcibly);
     }
     async tick(): Promise<void> {
         await this.taskQueue.execCmd("nop", []);
@@ -2926,7 +4044,7 @@ export class HCAWorker {
         // therefore we must strip all export declarations
         const origText = await response.text();
         const convertedText = ("\n" + origText).replace(/((\n|;)[ \t]*)((export[ \t]+\{.*?\}[ \t]*;{0,1})+|(export[ \t]+))/g, "$1").slice(1);
-        const blob = new Blob([convertedText], {type: "text/javascript"});
+        const blob = new Blob([convertedText], { type: "text/javascript" });
         const reader = new FileReader();
         reader.readAsDataURL(blob);
         const dataURI = await new Promise((res: (result: string) => void) => {
@@ -2935,10 +4053,18 @@ export class HCAWorker {
             }
         });
         selfUrl = new URL(dataURI, document.baseURI);
-        return new HCAWorker(selfUrl);
+        return new HCAWorker(selfUrl, blob);
     }
-    private constructor (selfUrl: URL) {
-        this.hcaWorker = new Worker(selfUrl, {type: "module"}); // setting type to "module" is currently bogus in Firefox
+    private constructor(selfUrl: URL, selfBlob?: Blob) {
+        try {
+            this.hcaWorker = new Worker(selfUrl, { type: "module" }); // setting type to "module" is currently bogus in Firefox
+        } catch (e) {
+            // workaround for legacy iOS Safari
+            if (selfBlob == null || !(selfBlob instanceof Blob)) throw e;
+            const objUrl = URL.createObjectURL(selfBlob);
+            this.hcaWorker = new Worker(objUrl, { type: "module" });
+            URL.revokeObjectURL(objUrl);
+        }
         this.selfUrl = selfUrl;
         this.taskQueue = new HCATaskQueue("Main-HCAWorker",
             (msg: any, trans: Transferable[]) => this.hcaWorker.postMessage(msg, trans),
@@ -2956,7 +4082,7 @@ export class HCAWorker {
         this.hcaWorker.onmessageerror = (msg) => this.taskQueue.errHandler(msg);
     }
     // commands
-    async getTransferConfig(): Promise<{transferArgs: boolean, replyArgs: boolean}> {
+    async getTransferConfig(): Promise<{ transferArgs: boolean, replyArgs: boolean }> {
         return await this.taskQueue.getTransferConfig();
     }
     async configTransfer(transferArgs: boolean, replyArgs: boolean): Promise<void> {
@@ -2968,11 +4094,14 @@ export class HCAWorker {
     async fixChecksum(hca: Uint8Array): Promise<Uint8Array> {
         return await this.taskQueue.execCmd("fixChecksum", [hca]);
     }
-    async decrypt(hca: Uint8Array, key1?: any, key2?: any): Promise<Uint8Array> {
-        return await this.taskQueue.execCmd("decrypt", [hca, key1, key2]);
+    async findKey(hca: Uint8Array, givenKeyList?: [any, any][], subkey?: any, threshold = 0.5, depth = 1024): Promise<[number, number] | undefined> {
+        return await this.taskQueue.execCmd("findKey", [hca, givenKeyList, subkey, threshold, depth]);
     }
-    async encrypt(hca: Uint8Array, key1?: any, key2?: any): Promise<Uint8Array> {
-        return await this.taskQueue.execCmd("encrypt", [hca, key1, key2]);
+    async decrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Promise<Uint8Array> {
+        return await this.taskQueue.execCmd("decrypt", [hca, key1, key2, subkey]);
+    }
+    async encrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Promise<Uint8Array> {
+        return await this.taskQueue.execCmd("encrypt", [hca, key1, key2, subkey]);
     }
     async addHeader(hca: Uint8Array, sig: string, newData: Uint8Array): Promise<Uint8Array> {
         return await this.taskQueue.execCmd("addHeader", [hca, sig, newData]);
@@ -2982,5 +4111,35 @@ export class HCAWorker {
     }
     async decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0): Promise<Uint8Array> {
         return await this.taskQueue.execCmd("decode", [hca, mode, loop, volume]);
+    }
+    async loadHCAForPlaying(hca: URL | string | Uint8Array, key1?: any, key2?: any, subkey?: any): Promise<void> {
+        if (typeof hca === "string") {
+            if (hca === "") throw new Error("empty URL");
+            hca = new URL(hca, document.baseURI);
+        } else if (!(hca instanceof URL) && !(hca instanceof Uint8Array))
+            throw new Error("hca must be either URL or Uint8Array");
+        if (this.awHcaPlayer == null) {
+            this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca, key1, key2, subkey);
+        } else {
+            try {
+                await this.awHcaPlayer.setSource(hca, key1, key2, subkey);
+            } catch (e) {
+                console.error(`awHcaPlayer.setSource failed, attempt recreate player instance`, e);
+                // FIXME memleak
+                this.awHcaPlayer = await HCAAudioWorkletHCAPlayer.create(this.selfUrl, hca, key1, key2, subkey);
+            }
+        }
+    }
+    async pausePlaying(): Promise<void> {
+        if (this.awHcaPlayer == null) throw new Error();
+        await this.awHcaPlayer.pause();
+    }
+    async resumePlaying(): Promise<void> {
+        if (this.awHcaPlayer == null) throw new Error();
+        await this.awHcaPlayer.play();
+    }
+    async stopPlaying(): Promise<void> {
+        if (this.awHcaPlayer == null) throw new Error();
+        await this.awHcaPlayer.stop();
     }
 }

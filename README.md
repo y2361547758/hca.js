@@ -1,17 +1,21 @@
 # HCA.js
 
-TypeScript port of [VGAudio](https://github.com/Thealexbarney/VGAudio)'s HCA codec
+TypeScript port of [VGAudio](https://github.com/Thealexbarney/VGAudio)'s and [vgmstream](https://github.com/vgmstream/vgmstream)'s HCA codec
 
-Thanks to [HCADecoder](https://github.com/Nyagamon/HCADecoder.git)
+Some parts are ported from [HCADecoder](https://github.com/Nyagamon/HCADecoder.git)
 
 Decrypt & decode hca(2.0) file in browser.
 
 # Functions
 
+- [x] HCA 3.0
 - [x] HCA 2.0
 - [ ] HCA 1.3
+- [x] unpack awb
 - [x] a/b Keys
+- [x] subkey
 - [x] decrypt
+- [x] test and find decryption key
 - [x] decode
 - [x] wave mode (8/16/24/32/float)
 - [x] loop
@@ -22,6 +26,8 @@ Decrypt & decode hca(2.0) file in browser.
 - [ ] FFT/DCT/DCTM/IDCTM (?)
 
 # Demo
+
+[oneclick.html](/oneclick.html)
 
 [hca.html](/hca.html)
 
@@ -42,16 +48,20 @@ let decryptedHca = HCA.decrypt(hca, "defaultkey");
 let wav = HCA.decode(decryptedHca);
 ```
 
-### `HCA.decrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array`
-### `HCA.encrypt(hca: Uint8Array, key1?: any, key2?: any): Uint8Array`
+### `HCA.decrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Uint8Array`
+### `HCA.encrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Uint8Array`
 
 Decrypt/encrypt & return the whole HCA file **in-place** with specified keys - in other words, if you don't want the input HCA    to be overwritten, you must pass in something like `hca.slice(0)`, which makes a new copy in a newly allocated buffer.
 
- - `key1` is **not optional**.
+ - `key1` is lower 32 bits of the keycode, which is **not optional**.
 
    1. If `key2` is not given, it defaults to zero.
 
    2. If `key1` is `"nokey"` or `"defaultkey"`, `key2` is then ignored. Setting `key1` to `"nokey"` means the encryption/decryption should be done in \"no key\" mode. Setting `key1` to `"defaultkey"` means the hard-coded default keys (allegedly for Magia Record) should be used for encryption/decryption.
+
+   3. `subkey` is ignored if set to zero.
+
+   4. `subkey` is only applied with cipher type `0x38` for now.
 
  - **Already-encrypted HCA cannot be directly re-encrypted.** You may check whether an HCA is already encrypted with something    like:
 
@@ -65,6 +75,29 @@ Decrypt/encrypt & return the whole HCA file **in-place** with specified keys - i
  - **Unencrypted HCA which lacks `ciph` header section cannot be directly encrypted.** See [HCAInfo.addCipherHeader](#hcainfoaddcipherheaderhca-uint8array-ciphertype-number--undefined--undefined-uint8array) below.
 
  - **Checksums will be verified in the process, and `Error` will be thrown on any mismatch.**
+
+### `HCA.findKey(hca: Uint8Array, givenKeyList?: [any, any][], subkey?: any, threshold = 0.5, depth = 1024): [number, number] | undefined`
+
+Test and find valid decryption key.
+
+ - `givenKeyList` is optional. If given, it should be an array of `[key1, key2]`.
+ 
+ An example `givenKeyList`:
+ 
+ ```JavaScript
+ [
+   [0x01395C51, 0x00000000], // Magia Record
+   [0x8ECED447, 0x6615518E], // Heaven Burns Red (Android)
+ ]
+ ```
+ 
+ - A built-in known key list will always be included regardless whether `givenKeyList` is given or not.
+
+ - For explanation of `key1`, `key2`, `subkey`, please refer to [HCA.decrypt](#hcadecrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array)/[HCA.encrypt](#hcaencrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array) above.
+ 
+ - This method will search for `depth` HCA blocks, 1024 by default.
+ 
+ - If `threshold` percentage (50% by default) of blocks can be decrypted and unpacked, the found key will be returned as `[key1, key2]`. Otherwise, `undefined` will be returned.
 
 ### `HCA.decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0): Uint8Array`
 
@@ -110,7 +143,7 @@ Return decoded (Windows PCM) WAV of the input whole HCA file. **The input HCA mu
 
  - Return a new HCA **in a newly allocated buffer** which is the input HCA with a newly added `ciph` header section.
 
- - There might be some HCA files which lacks `ciph` header section. Since [HCA.encrypt](#hcaencrypthca-uint8array-key1-any--undefined-key2-any--undefined-uint8array) is supposed to be in-place, combining with the fact that the size of `ArrayBuffer` in JavaScript cannot be adjusted, you must manually add the `ciph` header section back before encrypting it.
+ - There might be some HCA files which lacks `ciph` header section. Since [HCA.encrypt](#hcaencrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array) is supposed to be in-place, combining with the fact that the size of `ArrayBuffer` in JavaScript cannot be adjusted, you must manually add the `ciph` header section back before encrypting it.
 
  - **Throw `Error` if an existing `ciph` header section is already present.** Please check it with something like `new HCAInfo(hca).hasHeader["ciph"]` first.
 
@@ -196,11 +229,12 @@ async function decryptAndDecode(hca) {
 
  - Similar to the [HCAInfo.addCipherHeader](#hcainfoaddcipherheaderhca-uint8array-ciphertype-number--undefined--undefined-uint8array)/[HCAInfo.addHeader](#hcainfoaddheaderhca-uint8array-sig-string-newdata-uint8array-uint8array) raw APIs described above.
 
-### `async hcaWorkerInstance.decrypt(hca: Uint8Array, key1?: any, key2?: any): Promise<Uint8Array>`
-### `async hcaWorkerInstance.encrypt(hca: Uint8Array, key1?: any, key2?: any): Promise<Uint8Array>`
+### `async hcaWorkerInstance.decrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Promise<Uint8Array>`
+### `async hcaWorkerInstance.encrypt(hca: Uint8Array, key1?: any, key2?: any, subkey?: any): Promise<Uint8Array>`
+### `async hcaWorkerInstance.findKey(hca: Uint8Array, givenKeyList?: [any, any][], subkey?: any, threshold = 0.5, depth = 1024): Promise<[number, number] | undefined>`
 ### `async hcaWorkerInstance.decode(hca: Uint8Array, mode = 32, loop = 0, volume = 1.0): Promise<Uint8Array>`
 
- - Similar to the [HCA.decrypt](#hcadecrypthca-uint8array-key1-any--undefined-key2-any--undefined-uint8array)/[HCA.encrypt](#hcaencrypthca-uint8array-key1-any--undefined-key2-any--undefined-uint8array)/[HCA.decode](#hcadecodehca-uint8array-mode--32-loop--0-volume--10-uint8array) raw APIs described above.
+ - Similar to the [HCA.decrypt](#hcadecrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array)/[HCA.encrypt](#hcaencrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array)/[HCA.decode](#hcadecodehca-uint8array-mode--32-loop--0-volume--10-uint8array)/[HCA.findKey](#hcafindkeyhca-uint8array-givenkeylist-any-any-subkey-any-threshold--05-depth--1024-number-number--undefined) raw APIs described above.
 
 ### `async hcaWorkerInstance.tick(): Promise<void>`
 ### `async hcaWorkerInstance.tock(text = ""): Promise<number>`
@@ -251,6 +285,24 @@ async function decryptAndDecode(hca) {
 ### `async getTransferConfig(): Promise<{transferArgs: boolean, replyArgs: boolean}>`
 
  - Return the `transferArgs`, `replyArgs` config parameters described above.
+
+# Unpack AWB Archive
+
+### `AWBArchive.isAWB(file: Uint8Array): boolean`
+
+ - Return `true` if given `file` begins with "AFS2" magic value, which indicates it's an AWB archive. Return `false` otherwise.
+
+### `new AWBArchive(awb: Uint8Array)`
+
+ - Return an `AWBArchive` instance (referred as `AWBArchiveInstance` below) which contains various information parsed from AWB headers, and `HCA` files packed inside it.
+
+### `AWBArchiveInstance.subkey: number`
+
+ - `subkey` used to decrypt the packed HCA files. For explanation of `subkey`, please refer to [HCA.decrypt](#hcadecrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array)/[HCA.encrypt](#hcaencrypthca-uint8array-key1-any-key2-any-subkey-any-uint8array) above.
+
+### `AWBArchiveInstance.subkey: hcaFiles: { waveID: number, file: Uint8Array }[]`
+
+ - The given AWB archive file is splitted, so that the packed HCA files can be extracted.
 
 # The following APIs have been removed:
 -  ~`new HCA(key1, key2)`~

@@ -1,76 +1,169 @@
 <!DOCTYPE html>
 <html>
-<head></head>
+
+<head>
+    <style type="text/css">
+        body {
+            max-width: 100%;
+            max-height: 100%;
+        }
+
+        body .hidden {
+            display: none;
+            visibility: hidden;
+        }
+
+        body .overlay {
+            position: fixed;
+            z-index: 9999;
+            top: 0;
+            left: 0;
+            height: 100%;
+            width: 100%;
+            justify-content: center;
+            background-color: #000;
+            color: #fff;
+            filter: opacity(0.5);
+        }
+    </style>
+</head>
+
 <body>
+    <div id="audioctx_unlocker" class="hidden">
+        <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);">
+            AudioContext is locked.<br>Click to unlock.
+        </div>
+    </div>
+
     <h1>HCA decoder demo</h1>
+    <a href="https://github.com/y2361547758/hca.js">GitHub repo</a>
     <hr>
     <button disabled id="startworkerbtn">start background worker</button><br>
     <button disabled id="shutdownbtn">shutdown background worker</button><br>
     <hr>
-    <h3>Choose a HCA file</h3>
+    <h3>Choose a HCA or AWB file</h3>
     Drag & drop a file here,<br>
     <form id="localfileform">
-        Or pick a local file: <input type="file" id="localfile" accept=".hca,application/octet-stream" onchange="buttons.loadfilebtn = this.files.length > 0"><br>
+        Or pick a local file: <input type="file" id="localfile" accept=".hca,application/octet-stream"><br>
+        <input type="checkbox" id="hcaonly" checked>
+        <label for="hcaonly">pick HCA file only (uncheck if unable to pick)</label><br>
     </form>
     <b><u>Don't forget to</u></b> <button disabled id="loadfilebtn">load picked file</button><br>
-    Or download from URL: <input type="text" spellcheck="false" id="urlinput" value="bgm01_anime02_hca.hca"><br>
+    Or download from URL: <input type="text" spellcheck="false" id="urlinput" value="bgm22_battle01_hca.hca"><br>
     <button id="downloadbtn">download</button><br>
+    <div id="awbsubsongswitcher"></div>
     <hr>
     <h3>Set keys for decryption/encryption</h3>
     key1=<input type="text" spellcheck="false" id="key1input" value="0x01395C51"><br>
     key2=<input type="text" spellcheck="false" id="key2input" value="0x00000000"><br>
-    <i>Note: output waveform will be nothing but unpleasant meaningless noise if incorrect keys are given!</i><br>
+    <i>(optional) </i>subkey=<input type="text" spellcheck="false" id="subkeyinput" value="0x0"><br>
+    <i>Note: output waveform will be (almostly all) silence if incorrect keys are given!</i><br>
+    <hr>
+    <h3>Streaming (<a href="https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet">AudioWorklet API</a>)</h3>
+    <input type="checkbox" checked id="awautoplayondrop">
+    <label for="awautoplyondrop">Automatically play drag & dropped HCA file</label><br>
+    <b><u>Some browsers like Safari (Apple WebKit) may lock AudioContext initially, which blocks auto-play.<br>
+            To unlock AudioContext (so that auto-play will no longer be blocked),<br>
+            please click anywhere on this page after drag & drop.</u></b><br>
+    Load a HCA file for playing, which has been fully loaded/downloaded above:<br>
+    <button id="awloadwholehcabtn">Load</button><br>
+    Load directly from the URL above, without fully downloading the whole file:<br>
+    <button id="awloadfromurlbtn">Load</button><br>
+    Progress control:<br>
+    <input type="checkbox" id="awplayinbackground">
+    <label for="awplayinbackground">Play in background (may glitch)</label><br>
+    <button id="awresumebtn">Play/Resume</button><br>
+    <button id="awpausebtn">Pause</button><br>
+    <button id="awstopbtn">Stop</button><br>
+    <a href="#volumeslider">Volume control</a> (in "decoding parameters" section)<br>
     <hr>
     <h3>Decode the whole file</h3>
-    Decoding mode: <input type="number" step="8" min="0" max="32" placeholder="0-99" id="decodingmodeinput" value="16"><br>
-    Loop count: <input type="number" step="1" min="0" max="99" placeholder="0-99" id="loopcountinput" value="0"><br>
-    Volume: <input type="number" step="1" min="0" max="100" placeholder="0-100" id="volumeinput" value="100"><br>
     Note:<br>
-    (1) Setting decoding mode to <b>zero means 32-bit float mode</b>, or <b>8/16/24/32-bit integer mode</b> otherwise.<br>
-    (2) Loop count is <b>ignored if HCA header doesn't have loop section</b><br>
-    (3) Loop count doesn't count the existing part which is originally supposed to be looped.<br>
+    (1) <b>Please click "get HCA info" button first.</b><br>
+    (2) Setting decoding mode to <b>zero means 32-bit float mode</b>, or <b>8/16/24/32-bit integer mode</b>
+    otherwise.<br>
+    (3) Loop count is <b>ignored if HCA header doesn't have loop section</b><br>
+    (4) Loop count doesn't count the existing part which is originally supposed to be looped.<br>
     &nbsp;&nbsp;&nbsp;&nbsp;<b>In other words, actual loop count will be: the number set here plus one.</b><br>
-    (4) When <b>decoding the whole file</b>, setting loop count to <b>zero</b> means: <b>disabling loop</b>.</b><br>
-    <button disabled id="infobtn">get HCA info</button><br>
-    <style>
-        table {
-            border-top: 1px solid #000;
-            border-left: 1px solid #000;
-            border-spacing: 0;
-        }
-        tbody td {
-            border-bottom: 1px solid #000;
-            border-right: 1px solid #000;
-            min-width: 8ch;
-        }
-        thead tr th, tfoot tr th {
-            background-color: #fff;
-            color: #000;
-            border-bottom: 1px solid #000;
-            border-right: 1px solid #000;
-        }
-    </style>
-    <table id="hcaInfoTable">
-        <thead>
-            <tr>
-                <th colspan="3">HCA info</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td>(Not loaded)</td>
-            </tr>
-        </tbody>
-    </table>
-    <button disabled id="fixcsumbtn">fix checksum</button><br>
-    <button disabled id="encryptbtn">encrypt</button><br>
-    <button disabled id="decryptbtn">decrypt</button><br>
-    <button disabled id="decodebtn">decode</button><br>
-    <audio id="audioElement" controls></audio>
+    (5) When <b>decoding the whole file</b>, setting loop count to <b>zero</b> means: <b>disabling loop</b>.</b><br>
+    <fieldset>
+        <legend>HCA info</legend>
+        <button disabled id="infobtn">get HCA info</button><br>
+        <style>
+            table {
+                border-top: 1px solid #000;
+                border-left: 1px solid #000;
+                border-spacing: 0;
+            }
+
+            tbody td {
+                border-bottom: 1px solid #000;
+                border-right: 1px solid #000;
+                min-width: 8ch;
+            }
+
+            thead tr th,
+            tfoot tr th {
+                background-color: #fff;
+                color: #000;
+                border-bottom: 1px solid #000;
+                border-right: 1px solid #000;
+            }
+        </style>
+        <table id="hcaInfoTable">
+            <thead>
+                <tr>
+                    <th colspan="3">HCA info</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>(Not loaded)</td>
+                </tr>
+            </tbody>
+        </table>
+    </fieldset>
+    <fieldset>
+        <legend>Checksum</legend>
+        <button disabled id="fixcsumbtn">fix checksum</button><br>
+    </fieldset>
+    <fieldset>
+        <legend>Cipher</legend>
+        <button disabled id="encryptbtn">encrypt</button><br>
+        <button disabled id="decryptbtn">decrypt</button><br>
+    </fieldset>
+    <fieldset>
+        <legend>Decoding parameters</legend>
+        Decoding mode: <input type="number" step="8" min="0" max="32" placeholder="0-99" id="decodingmodeinput"
+            value="16"><br>
+        Loop count: <input type="number" step="1" min="0" max="99" placeholder="0-99" id="loopcountinput" value="0"><br>
+        Volume: <input type="range" step="1" min="0" max="100" placeholder="0-100" id="volumeslider" value="100">
+        <input type="number" step="1" min="0" max="100" placeholder="0-100" id="volumeinput" value="100"><br>
+        <i>This volume control affects <a href="#awresumebtn">AudioWorklet</a> and <a
+                href="#webaudioplaybtn">WebAudio</a> playing as well.</i><br>
+    </fieldset>
+    <fieldset>
+        <legend>Decode to HTML5 Audio</legend>
+        <button disabled id="decodetoh5btn">decode</button><br>
+        <audio id="audioElement" controls></audio><br>
+    </fieldset>
+    <fieldset>
+        <legend>Decode to WebAudio AudioBufferSourceNode</legend>
+        <b>Playing will seamlessly loop if HCA supports looping.</b><br>
+        <button disabled id="decodetowabtn">decode</button><br>
+        <input type="checkbox" id="webaudioplayinbackground">
+        <label for="webaudioplayinbackground">Play in background (may glitch)</label><br>
+        <button disabled id="webaudioplaybtn">Play</button><br>
+        <button disabled id="webaudiopausebtn">Pause</button><br>
+        <button disabled id="webaudiostopbtn">Stop</button><br>
+    </fieldset>
     <!-- <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.8.3/dist/ffmpeg.min.js"></script> -->
+    <script>
+        var AWBSubsongSelect = null;
+    </script>
     <script type="module">
         const hcaJsUrl = new URL("hca.js", document.baseURI);
-        var hcaJsModule, hcaJsObjUrl, HCAInfo, HCAWorker;
+        var hcaJsModule, hcaJsObjUrl, AWBArchive, HCAInfo, HCAWorker, HCAWebAudioLoopPlayer;
 
         // mime types
         const defMimeType = "application/octet-stream";
@@ -82,20 +175,77 @@
         // HCAWorker instance
         var worker = null;
 
+        // HCAWebAudioLoopPlayer instance
+        var webAudioLoopPlayer = null;
+
         // dragged file
         var draggedFile = null;
+
+        // parsed AWB
+        var parsedAWB = null;
 
         // local file picker
         const localfile = document.getElementById("localfile");
         const localfileform = document.getElementById("localfileform");
+        // onchange does not work on iOS Safari
+        localfile.addEventListener("change", function (ev) { buttons.loadfilebtn = this.files.length > 0; });
         // reset state on refresh
         // https://bugzilla.mozilla.org/show_bug.cgi?id=685657
         localfileform.reset();
+        // workaround for iOS Safari file picker
+        document.getElementById("hcaonly").addEventListener("change", function (ev) {
+            localfile.accept = ev.target.checked ? ".hca,application/octet-stream" : "";
+        });
+        // AWB subsong switcher
+        const awbsubsongswitcher = document.getElementById("awbsubsongswitcher");
+        AWBSubsongSelect = function (selected, doNotPlay) {
+            let index = selected.id.replace(/^awb_subsong_index_/, "");
+            fileName = `${AWBFileName}_${index}.hca`;
+            hcaFileData.original.data = parsedAWB.hcaFiles[index].file;
+            if (!doNotPlay && document.getElementById("awautoplayondrop").checked) {
+                // doNotPlay=true, will play in "drop" event
+                buttons.awloadwholehcabtn = "click";
+                buttons.awresumebtn = "click";
+            }
+        }
+        function setAWBSubSongSwitcher(enable) {
+            if (!enable) {
+                awbsubsongswitcher.innerHTML = "";
+                keys.subkey = "0x0";
+                return;
+            }
+
+            const subkey = `0x${parsedAWB.subkey.toString(16).toUpperCase()}`;
+
+            console.log(`AWB archive version=[${parsedAWB.version}]`
+                + `, subsong count=[${parsedAWB.hcaFiles.length}], subkey=[${subkey}]`);
+
+            const listEntries = parsedAWB.hcaFiles.map((entry, index) => {
+                // filter out non-HCA entries
+                if (entry.file.byteLength == 0) return;
+                try {
+                    new HCAInfo(entry.file);
+                } catch (e) {
+                    return;
+                }
+                // convert to HTML
+                return `<div><input type=\"radio\" name=\"awb_subsong_id\" id=\"awb_subsong_index_${index}\"`
+                    + ` onclick=\"AWBSubsongSelect(this);\">`
+                    + `<label for=\"awb_subsong_index_${index}\">waveID=${entry.waveID}</label>`
+                    + `</div>`;
+            }).filter((str) => str != null).join("\n");
+
+            keys.subkey = subkey;
+            awbsubsongswitcher.innerHTML = `<fieldset><legend>AWB archive subsongs</legend>\n`
+                + `${listEntries}\n`
+                + `</fieldset>`;
+        }
 
         // input HCA URL
         const urlinput = document.getElementById("urlinput");
 
         // file name
+        var AWBFileName = null;
         var fileName = null;
 
         // HCA info table
@@ -112,7 +262,7 @@
             },
         }
         Object.defineProperty(hcaInfoTable.body, "data", {
-            get: function () {return this.value},
+            get: function () { return this.value },
             set: function (val) {
                 // clear existing content
                 for (let i = hcaInfoTable.body.el.getElementsByTagName("tr").length - 1; i >= 0; i--) {
@@ -156,6 +306,7 @@
                         ["Blocks", info.format.blockCount],
                         ["Dropped smpl. (head)", info.format.droppedHeader],
                         ["Dropped smpl. (tail)", info.format.droppedFooter],
+                        ["Duration (calc)", `${info.duration.toFixed(3)}s`],
                     ]],
                     ["Block size", !info.hasHeader["comp"] && !info.hasHeader["dec"] ? null : info.blockSize],
                     ["Bitrate (kbps)", !info.hasHeader["comp"] && !info.hasHeader["dec"] ? null : info.kbps],
@@ -166,6 +317,9 @@
                         ["End", info.loop.end],
                         ["Dropped smpl. (head)", info.loop.droppedHeader],
                         ["Dropped smpl. (tail)", info.loop.droppedFooter],
+                        ["StartTime (calc)", `${info.loopStartTime.toFixed(3)}s`],
+                        ["EndTime (calc)", `${info.loopEndTime.toFixed(3)}s`],
+                        ["Duration (calc)", `${info.loopDuration.toFixed(3)}s`],
                     ]],
                     ["Cipher", !info.hasHeader["ciph"] ? null : toHex(info.cipher)],
                     ["RVA (volume)", !info.hasHeader["rva"] ? null : info.rva],
@@ -190,12 +344,26 @@
         });
 
         // keys
-        const keys = {key1: undefined, key2: undefined};
+        const keys = { key1: undefined, key2: undefined, subkey: undefined };
         for (let key in keys) {
             Object.defineProperty(keys, key, {
-                get: function () {return document.getElementById(key + "input").value},
-                set: function (val) {document.getElementById(key + "input").value = val},
+                get: function () { return document.getElementById(key + "input").value },
+                set: function (val) { document.getElementById(key + "input").value = val },
             });
+        }
+        async function testAndFindValidKeyAsync() {
+            worker.tick();
+            let resultPromise = worker.findKey(hcaFileData.original.data, [[keys.key1, keys.key2]], keys.subkey);
+            worker.tock(`findKey`);
+            let result = await resultPromise;
+            if (result != null) {
+                result = result.map((k) => `0x${k.toString(16).toUpperCase()}`);
+                console.log(`found valid key`, result);
+                keys.key1 = result[0];
+                keys.key2 = result[1];
+            } else {
+                console.warn(`not encrypted, or no valid key found!`);
+            }
         }
 
         // mode/loop/volume
@@ -213,6 +381,41 @@
                 defVal: 100,
             },
         }
+
+        function setVolume(val) {
+            val = Number(val) / 100;
+            if (worker != null && worker.awHcaPlayer != null) {
+                worker.awHcaPlayer.volume = val;
+            }
+            if (webAudioLoopPlayer != null) {
+                webAudioLoopPlayer.volume = val;
+            }
+        }
+        document.getElementById("volumeslider").addEventListener("input", (ev) => {
+            const val = ev.target.value;
+            document.getElementById("volumeinput").value = val;
+            setVolume(val);
+        });
+        document.getElementById("volumeinput").addEventListener("input", (ev) => {
+            const val = ev.target.value;
+            const slider = document.getElementById("volumeslider");
+            if (slider.value != val) {
+                slider.value = val;
+            }
+            setVolume(val);
+        });
+
+        // play in background checkbox
+        const awplayinbackground = document.getElementById("awplayinbackground");
+        awplayinbackground.addEventListener("change", (ev) => {
+            if (worker == null || worker.awHcaPlayer == null) return;
+            worker.awHcaPlayer.playInBackground = ev.target.checked;
+        }, false);
+        const webaudioplayinbackground = document.getElementById("webaudioplayinbackground");
+        webaudioplayinbackground.addEventListener("change", (ev) => {
+            if (webAudioLoopPlayer == null) return;
+            webAudioLoopPlayer.playInBackground = ev.target.checked;
+        }, false);
 
         for (let paramName in decodingParam) {
             let el = decodingParam[paramName].el;
@@ -269,13 +472,13 @@
             },
             // after decoding
             decoded: {
-                btnID: "decodebtn",
+                btnID: "decodetoh5btn",
                 data: {},
             },
         }
         for (let suffix in hcaFileData) {
             Object.defineProperty(hcaFileData[suffix], "data", {
-                get: function () {return this.value},
+                get: function () { return this.value },
                 set: function (val) {
                     this.value = null; // clear existing data
                     const fileExtRegEx = /\.([^\.]+)$/;
@@ -302,11 +505,11 @@
                     let extName = newFileName.match(fileExtRegEx)[0];
                     let mimeType = mimeTypeMap[extName];
                     if (mimeType == null) mimeType = defMimeType;
-                    el.setAttribute("href", URL.createObjectURL(new Blob([val], {type: mimeType})));
+                    el.setAttribute("href", URL.createObjectURL(new Blob([val], { type: mimeType })));
                     el.innerHTML = newFileName;
                     let refNode = document.getElementById(hcaFileData[suffix].btnID).nextSibling;
-                    document.body.insertBefore(document.createElement("br"), refNode);
-                    document.body.insertBefore(el, refNode);
+                    refNode.parentElement.insertBefore(document.createElement("br"), refNode);
+                    refNode.parentElement.insertBefore(el, refNode);
                     // update value
                     this.value = val;
                 },
@@ -317,6 +520,7 @@
             for (let suffix in hcaFileData) {
                 hcaFileData[suffix].data = null;
             }
+            setAWBSubSongSwitcher(null);
             hcaInfoTable.body.data = null;
             audioElement.src = null;
             console.log(`cleared all data`);
@@ -328,7 +532,7 @@
             src: ""
         };
         Object.defineProperty(audioElement, "src", {
-            get: function () {return this.value},
+            get: function () { return this.value },
             set: function (val) {
                 if (this.value != null && this.value != "")
                     URL.revokeObjectURL(this.value);
@@ -338,7 +542,7 @@
                 }
                 let newUrl;
                 if (val instanceof ArrayBuffer || val.buffer instanceof ArrayBuffer) {
-                    newUrl = URL.createObjectURL(new Blob([val], {type: mimeTypeMap.wav}));
+                    newUrl = URL.createObjectURL(new Blob([val], { type: mimeTypeMap.wav }));
                 } else {
                     newUrl = val;
                 }
@@ -347,21 +551,26 @@
         });
 
         // buttons
+        const hcaWorkerLoadedEvent = new CustomEvent("hcaworkerloaded");
+        const audioCtxUnlockedEvent = new CustomEvent("audioctxunlocked");
         const buttons = {
             startworkerbtn: async (self) => {
                 if (worker == null) {
                     if (hcaJsObjUrl == null) {
                         const response = await fetch(hcaJsUrl.href);
-                        const blob = new Blob([await response.arrayBuffer()], {type: "text/javascript"});
+                        const blob = new Blob([await response.arrayBuffer()], { type: "text/javascript" });
                         hcaJsObjUrl = URL.createObjectURL(blob);
                     }
                     if (hcaJsModule == null) {
                         hcaJsModule = await import(hcaJsObjUrl);
                     }
+                    if (AWBArchive == null) AWBArchive = hcaJsModule.AWBArchive;
                     if (HCAInfo == null) HCAInfo = hcaJsModule.HCAInfo;
                     if (HCAWorker == null) HCAWorker = hcaJsModule.HCAWorker;
+                    if (HCAWebAudioLoopPlayer == null) HCAWebAudioLoopPlayer = hcaJsModule.HCAWebAudioLoopPlayer;
                     worker = await HCAWorker.create(hcaJsObjUrl);
                     console.log("started background worker");
+                    window.dispatchEvent(hcaWorkerLoadedEvent);
                 }
                 self.disabled = true; // added because button won't grey out if there's any await above
                 buttons.shutdownbtn = true;
@@ -392,12 +601,39 @@
                 clearAllData();
                 resetButtonsExcept(self.id);
                 // update data
-                let ab = await file.arrayBuffer();
-                hcaFileData.original.data = new Uint8Array(ab);
+                let ab;
+                if (file.arrayBuffer == null) {
+                    let objUrl = URL.createObjectURL(file);
+                    let resp = await fetch(objUrl);
+                    URL.revokeObjectURL(objUrl);
+                    ab = await resp.arrayBuffer();
+                } else {
+                    ab = await file.arrayBuffer();
+                }
+                // parse AWB
+                AWBFileName = null;
+                parsedAWB = null;
+                if (AWBArchive.isAWB(new Uint8Array(ab))) {
+                    try {
+                        parsedAWB = new AWBArchive(new Uint8Array(ab));
+                    } catch (e) {
+                        console.error(`error parsing AWB archive`, e);
+                    }
+                }
+                if (parsedAWB != null && parsedAWB.hcaFiles.length > 0) {
+                    AWBFileName = fileName;
+                    setAWBSubSongSwitcher(true);
+                    AWBSubsongSelect({ id: "awb_subsong_index_0" }, true); // doNotPlay=true, will play in "drop" event
+                } else {
+                    setAWBSubSongSwitcher(null);
+                    hcaFileData.original.data = new Uint8Array(ab);
+                }
+                // find valid key
+                await testAndFindValidKeyAsync();
                 self.textContent = "load picked file (successful)";
-                // let the button bounce
-                self.disabled = false;
+                // no need to let the button bounce
                 // next step
+                buttons.awloadwholehcabtn = true;
                 buttons.infobtn = true;
                 buttons.fixcsumbtn = true;
             },
@@ -458,13 +694,107 @@
                 resetButtonsExcept(self.id);
                 // update data
                 let ab = await response.arrayBuffer();
-                hcaFileData.original.data = new Uint8Array(ab);
+                // parse AWB
+                AWBFileName = null;
+                parsedAWB = null;
+                if (AWBArchive.isAWB(new Uint8Array(ab))) {
+                    try {
+                        parsedAWB = new AWBArchive(new Uint8Array(ab));
+                    } catch (e) {
+                        console.error(`error parsing AWB archive`, e);
+                    }
+                }
+                if (parsedAWB != null && parsedAWB.hcaFiles.length > 0) {
+                    AWBFileName = fileName;
+                    setAWBSubSongSwitcher(true);
+                    AWBSubsongSelect({ id: "awb_subsong_index_0" }, true); // doNotPlay=true, will play in "drop" event
+                } else {
+                    setAWBSubSongSwitcher(null);
+                    hcaFileData.original.data = new Uint8Array(ab);
+                }
                 self.textContent = "download (successful)";
+                // find valid key
+                await testAndFindValidKeyAsync();
                 // let the button bounce
                 self.disabled = false;
                 // next step
+                buttons.awloadwholehcabtn = true;
                 buttons.infobtn = true;
                 buttons.fixcsumbtn = true;
+            },
+            awloadwholehcabtn: async (self) => {
+                try {
+                    await worker.loadHCAForPlaying(hcaFileData.original.data, keys.key1, keys.key2, keys.subkey);
+                    worker.awHcaPlayer.playInBackground = awplayinbackground.checked;
+                    self.textContent = "Load (successful)";
+                } catch (e) {
+                    self.textContent = "Load (failed)";
+                    console.error(e);
+                }
+                // let the button bounce
+                self.disabled = false;
+                // next step
+                buttons.awpausebtn = false;
+                buttons.awresumebtn = true;
+                buttons.awstopbtn = true;
+                // TODO pause/rewind/fast-forward etc
+            },
+            awloadfromurlbtn: async (self) => {
+                try {
+                    await worker.loadHCAForPlaying(urlinput.value, keys.key1, keys.key2, keys.subkey);
+                    worker.awHcaPlayer.playInBackground = awplayinbackground.checked;
+                    self.textContent = "Load (successful)";
+                } catch (e) {
+                    self.textContent = "Load (failed)";
+                    console.error(e);
+                }
+                // let the button bounce
+                self.disabled = false;
+                // next step
+                buttons.awpausebtn = false;
+                buttons.awresumebtn = true;
+                buttons.awstopbtn = true;
+                // TODO rewind/fast-forward etc
+            },
+            awpausebtn: async (self) => {
+                try {
+                    await worker.pausePlaying();
+                    self.textContent = "Paused";
+                } catch (e) {
+                    self.textContent = "Pause (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.awresumebtn = true;
+            },
+            awresumebtn: async (self) => {
+                try {
+                    await worker.resumePlaying();
+                    self.textContent = "Playing/Resumed";
+                } catch (e) {
+                    self.textContent = "Play/Resume (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.awpausebtn = true;
+            },
+            awstopbtn: async (self) => {
+                try {
+                    await worker.stopPlaying();
+                    self.textContent = "Stopped";
+                } catch (e) {
+                    self.textContent = "Stop (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.awpausebtn = false;
+                buttons.awresumebtn = false;
             },
             infobtn: async (self) => {
                 let hca = hcaFileData[
@@ -481,10 +811,11 @@
                     // update table content
                     hcaInfoTable.body.data = info;
                     // next step
-                    let isEncrypted = info.hasHeader["ciph"] && info.cipher !=0;
+                    let isEncrypted = info.hasHeader["ciph"] && info.cipher != 0;
                     buttons.encryptbtn = !isEncrypted;
                     buttons.decryptbtn = isEncrypted;
-                    buttons.decodebtn = !isEncrypted;
+                    buttons.decodetoh5btn = !isEncrypted;
+                    buttons.decodetowabtn = !isEncrypted;
                 } catch (e) {
                     console.error(e);
                     self.textContent = "get HCA info (failed)";
@@ -518,7 +849,7 @@
                 // let the button bounce
                 self.disabled = false;
             },
-            decodebtn: async (self) => {
+            decodetoh5btn: async (self) => {
                 // prepare data
                 let hca = hcaFileData[
                     ["decrypted", "fixed_checksum", "original"].find((suffix) => {
@@ -547,6 +878,77 @@
                 // let the button bounce
                 self.disabled = false;
             },
+            decodetowabtn: async (self) => {
+                // prepare data
+                let hca = hcaFileData[
+                    ["decrypted", "fixed_checksum", "original"].find((suffix) => {
+                        if (hcaFileData[suffix].data != null) {
+                            console.log(`decoding ${suffix} data...`);
+                            return true;
+                        }
+                    })
+                ].data;
+                // start decoding
+                try {
+                    worker.tick();
+                    let decodedPromise = HCAWebAudioLoopPlayer.create(hca, worker, decodingParam.volumePerCent / 100);
+                    worker.tock("decoding");
+                    let newPlayer = await decodedPromise;
+                    // update player instance
+                    if (webAudioLoopPlayer != null) await webAudioLoopPlayer.stop();
+                    webAudioLoopPlayer = newPlayer;
+                    webAudioLoopPlayer.playInBackground = webaudioplayinbackground.checked;
+                    self.textContent = "decode (done)";
+                    // next step (play)
+                    buttons.webaudioplaybtn = true;
+                } catch (e) {
+                    console.error(e);
+                    self.textContent = "decode (failed)";
+                }
+                // let the button bounce
+                self.disabled = false;
+            },
+            webaudioplaybtn: async (self) => {
+                try {
+                    webAudioLoopPlayer.play();
+                    self.textContent = "Playing/Resumed";
+                } catch (e) {
+                    self.textContent = "Play/Resume (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.webaudiopausebtn = true;
+                buttons.webaudiostopbtn = true;
+            },
+            webaudiopausebtn: async (self) => {
+                try {
+                    webAudioLoopPlayer.pause();
+                    self.textContent = "Paused";
+                } catch (e) {
+                    self.textContent = "Pause (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.webaudioplaybtn = true;
+            },
+            webaudiostopbtn: async (self) => {
+                try {
+                    await webAudioLoopPlayer.stop();
+                    self.textContent = "Stopped";
+                } catch (e) {
+                    self.textContent = "Stop (Error)";
+                    console.log(e);
+                    // let the button bounce
+                    self.disabled = false;
+                }
+                // next step
+                buttons.webaudiopausebtn = false;
+                buttons.webaudioplaybtn = false;
+            },
         };
         const _buttons = {};
         for (let id in buttons) {
@@ -559,7 +961,7 @@
             }
             const initialText = el.textContent;
             Object.defineProperty(buttons, id, {
-                get: function () {return !el.disabled},
+                get: function () { return !el.disabled },
                 set: function (val) {
                     if (val === "click") {
                         el.disabled = true;
@@ -571,10 +973,9 @@
                 },
             });
             Object.defineProperty(_buttons, id, {
-                get: function () {return onclick;},
+                get: function () { return onclick; },
             });
         }
-        buttons.startworkerbtn = "click"; // start background worker
         function resetButtonsExcept(exceptBtnID) {
             for (let btnID in buttons) {
                 if (btnID !== exceptBtnID) switch (btnID) {
@@ -590,6 +991,18 @@
                     case "downloadbtn":
                         buttons[btnID] = true;
                         break;
+                    case "awloadwholehcabtn":
+                        buttons[btnID] = false;
+                        break;
+                    case "awloadfromurlbtn":
+                        buttons[btnID] = true;
+                        break;
+                    case "awresumebtn":
+                    case "awpausebtn":
+                    case "awstopbtn":
+                        // do not reset except on refresh
+                        if (exceptBtnID == null) buttons[btnID] = false;
+                        break;
                     default:
                         buttons[btnID] = false;
                 }
@@ -603,9 +1016,11 @@
             self.disabled = true;
             buttons[opposite + "btn"] = false;
             self.textContent = action + "ing...";
-            // disable decodebtn if necessary
-            if (!isEncrypting)
-                buttons.decodebtn = false
+            // disable decodetoh5btn and decodetowabtn if necessary
+            if (!isEncrypting) {
+                buttons.decodetoh5btn = false;
+                buttons.decodetowabtn = false;
+            }
             // prepare data
             let hca = hcaFileData[
                 [opposite + "ed", "fixed_checksum", "original"].find((suffix) => {
@@ -628,7 +1043,7 @@
                 // although decryption/encryption is done in-place,
                 // however since we are not using SharedArrayBuffer,
                 // the background worker is still actually overwritting a newly allocated buffer
-                let resultPromise = worker[action](hca, keys.key1, keys.key2);
+                let resultPromise = worker[action](hca, keys.key1, keys.key2, keys.subkey);
                 worker.tock(isEncrypting ? "encryption" : "decryption");
                 let result = await resultPromise;
                 self.textContent = action + " (done)";
@@ -636,13 +1051,131 @@
                 hcaFileData[action + "ed"].data = result;
                 // next steps
                 buttons[opposite + "btn"] = true;
-                if (!isEncrypting)
-                    buttons.decodebtn = true;
+                if (!isEncrypting) {
+                    buttons.decodetoh5btn = true;
+                    buttons.decodetowabtn = true;
+                }
             } catch (e) {
                 console.error(e);
                 self.textContent = "Error during " + (isEncrypting ? "encryption" : "decryption");
             }
         }
+        window.addEventListener("dragover", function (ev) {
+            // https://stackoverflow.com/questions/46668079/addeventlistener-drop-not-firing
+            ev.preventDefault();
+        });
+
+        const audioCtxUnlocker = document.getElementById("audioctx_unlocker");
+        function setShowAudioCtxUnlocker(show) {
+            if (show) {
+                audioCtxUnlocker.classList.add("overlay");
+                audioCtxUnlocker.classList.remove("hidden");
+            } else {
+                audioCtxUnlocker.classList.add("hidden");
+            }
+        }
+
+        var tryingUnlock = false;
+        function tryUnlock() {
+            if (worker.awHcaPlayer && !worker.awHcaPlayer.unlocked) {
+                // FIXME temporary workaround
+                if (!tryingUnlock) {
+                    tryingUnlock = true;
+                    const id = "awresumebtn";
+                    const el = document.getElementById(id);
+                    el.disabled = true;
+                    _buttons[id](el).then(() => {
+                        tryingUnlock = false;
+                        setShowAudioCtxUnlocker(false);
+                        window.dispatchEvent(audioCtxUnlockedEvent);
+                    });
+                }
+            }
+        }
+        window.addEventListener("click", function (ev) {
+            tryUnlock();
+        });
+        window.addEventListener("drop", function (ev) {
+            ev.preventDefault();
+            let file = null;
+            const dtItems = ev.dataTransfer.items;
+            const dtFiles = ev.dataTransfer.files;
+            if (dtItems != null && dtItems.length == 1) {
+                // Use DataTransferItemList interface to access the file(s)
+                const item = dtItems[0];
+                if (item.kind === "file") {
+                    file = item.getAsFile();
+                }
+            } else if (dtFiles != null && dtFiles.length == 1) {
+                // Use DataTransfer interface to access the file(s)
+                file = dtFiles[0];
+            }
+            if (file != null) {
+                draggedFile = file;
+                let btnToClick = ["loadfilebtn", "infobtn"];
+                const autoPlay = document.getElementById("awautoplayondrop").checked;
+                if (autoPlay) {
+                    btnToClick.push("awloadwholehcabtn", "awresumebtn");
+                    //tryUnlock(); // did not seem to work
+                }
+                const iter = btnToClick.values();
+                const clickNextBtn = function () {
+                    let id = iter.next();
+                    if (id.done) return;
+                    id = id.value;
+                    if (typeof id !== "string") throw new Error();
+                    if (id === "awloadwholehcabtn" || id === "awresumebtn") {
+                        if (worker.awHcaPlayer && !worker.awHcaPlayer.unlocked) {
+                            // FIXME temporary workaround
+                            console.warn("awHcaPlayer is still locked, give up before clicking " + id);
+                            setShowAudioCtxUnlocker(true);
+                            return;
+                        }
+                    }
+                    const el = document.getElementById(id);
+                    el.disabled = true;
+                    _buttons[id](el).then(() => { clickNextBtn(); });
+                }
+                clickNextBtn();
+            }
+        });
+
+        const handleHashChange = async (ev) => {
+            const hash = window.location.hash;
+            if (hash == null || hash === "" || hash === "#") return;
+            if (document.getElementById(hash.replace(/^#/, "")) != null) return;
+
+            urlinput.value = window.location.hash.replace(/^#/, "");
+
+            const id = "awloadfromurlbtn";
+            const el = document.getElementById(id);
+            el.disabled = true;
+            await new Promise((resolve) => {
+                _buttons[id](el).then(() => {
+                    if (worker.awHcaPlayer.unlocked) {
+                        resolve();
+                        return;
+                    }
+                    setShowAudioCtxUnlocker(true);
+                    const listener = () => {
+                        window.removeEventListener(audioCtxUnlockedEvent.type, listener);
+                        resolve();
+                    }
+                    window.addEventListener(audioCtxUnlockedEvent.type, listener);
+                });
+            });
+
+            buttons.awresumebtn = "click";
+        }
+
+        window.addEventListener("load", () => {
+            window.addEventListener(hcaWorkerLoadedEvent.type, () => {
+                handleHashChange();
+                window.addEventListener("hashchange", handleHashChange);
+            });
+            buttons.startworkerbtn = "click"; // start background worker
+        });
     </script>
 </body>
+
 </html>
